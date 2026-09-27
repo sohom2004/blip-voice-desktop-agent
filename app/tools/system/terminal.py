@@ -208,6 +208,40 @@ class TerminalManager:
         except Exception:
             return False
 
+    async def await_job(self, job_id: str, timeout: float = 30.0) -> CommandResult:
+        """Wait for a background job to finish and return its full output and exit code."""
+        job = self.background_jobs.get(job_id)
+        if not job:
+            return CommandResult(
+                command="unknown",
+                exit_code=-1,
+                stdout="",
+                stderr=f"Background job '{job_id}' not found.",
+                duration_seconds=0.0,
+            )
+
+        start = time.perf_counter()
+        while not job.is_finished:
+            if time.perf_counter() - start > timeout:
+                return CommandResult(
+                    command=job.command,
+                    exit_code=None,
+                    stdout="".join(job.output_buffer[-40:]),
+                    stderr=f"Timed out waiting for job {job_id} after {timeout:.1f}s (process still running).",
+                    duration_seconds=round(time.perf_counter() - start, 2),
+                    timed_out=True,
+                )
+            await asyncio.sleep(0.2)
+
+        return CommandResult(
+            command=job.command,
+            exit_code=job.exit_code,
+            stdout="".join(job.output_buffer),
+            stderr="",
+            duration_seconds=round(time.perf_counter() - start, 2),
+            timed_out=False,
+        )
+
 
 # Global terminal singleton
 terminal_manager = TerminalManager()

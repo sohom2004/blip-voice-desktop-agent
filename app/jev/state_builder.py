@@ -11,6 +11,7 @@ from typing import Any
 
 from app.tools.desktop.ui_automation import ui_inspector
 from app.tools.desktop.window_manager import WindowInfo, window_manager
+from app.workers.vision import vision_engine
 
 logger = logging.getLogger(__name__)
 
@@ -46,10 +47,19 @@ class DesktopStateBuilder:
 
         active_window_dict = None
         if active_win:
+            proc = active_win.process_name.lower()
+            if proc in vision_engine.TERMINAL_PROCESSES or "terminal" in proc:
+                app_type = "terminal"
+            elif proc in vision_engine.BROWSER_PROCESSES or "chrome" in proc or "brave" in proc:
+                app_type = "browser"
+            else:
+                app_type = "desktop_app"
+
             active_window_dict = {
                 "hwnd": active_win.hwnd,
                 "title": active_win.title,
                 "process": active_win.process_name,
+                "app_type": app_type,
                 "is_active": True,
             }
 

@@ -78,19 +78,25 @@ class MasterOrchestrator:
                 "decision": decision.to_dict(),
             }
 
-        # Step 3: Escalation Path directly to Gemini Live Speech-to-Speech Model
-        logger.info("Escalating to Gemini Live Speech Model (reason: complex reasoning / vision needed)")
-        self._emit_event("speech_model_escalation_start", {"model": settings.gemini_live_model})
+        # Step 3: Escalation Path to System Two (Complex LLM Worker with Vision & Tools)
+        logger.info("Escalating to System Two Complex LLM Worker (reason: complex reasoning / vision needed)")
+        self._emit_event("system_two_reasoning_start", {"model": settings.complex_llm_model})
 
-        from app.voice.agent import delegate_to_speech_model
-        speech_res = await delegate_to_speech_model(user_command)
+        from app.workers.llm_worker import llm_worker
+        loop = asyncio.get_running_loop()
+        worker_res = await loop.run_in_executor(
+            None,
+            lambda: llm_worker.execute_task(user_command, initial_state=state)
+        )
         elapsed = round(time.perf_counter() - start_time, 3)
 
-        self._emit_event("task_done", {"tier": "speech_model_gemini_live", "duration": elapsed, "result": speech_res})
+        summary = worker_res.get("summary", "Task executed.")
+
+        self._emit_event("task_done", {"tier": "system_two_reasoning", "duration": elapsed, "result": worker_res})
         return {
-            "tier": "speech_model_gemini_live",
-            "action": "complex_speech_agent_execution",
-            "message": speech_res.get("message", "Task handed to Gemini Live speech model."),
+            "tier": "system_two_reasoning",
+            "action": "complex_task_execution",
+            "message": summary,
             "duration_seconds": elapsed,
             "decision": decision.to_dict(),
         }

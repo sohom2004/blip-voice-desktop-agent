@@ -30,6 +30,7 @@ INTERACTIVE_CONTROL_TYPES = {
     "HyperlinkControl",
     "ListItemControl",
     "TreeItemControl",
+    "TextControl",
 }
 
 
@@ -93,6 +94,9 @@ class UIAutomationInspector:
                                 auto_id = child.AutomationId.strip()
 
                                 # Keep interactive elements or elements with meaningful names
+                                if ctype == "TextControl" and (len(name) < 3 or (name and 0xE000 <= ord(name[0]) <= 0xF8FF)):
+                                    continue
+
                                 if ctype in INTERACTIVE_CONTROL_TYPES and (name or auto_id):
                                     count += 1
                                     center_x = (rect.left + rect.right) // 2

@@ -32,7 +32,9 @@ from livekit.agents.voice.events import ToolCallStarted, ToolCallEnded
 from livekit.plugins import google
 
 from app.config import settings
+from app.tools.browser.browser_manager import browser_manager
 from app.tools.desktop.mouse_keyboard import mouse_keyboard
+from app.tools.desktop.screen_capture import screen_capture
 from app.tools.desktop.ui_automation import ui_inspector
 from app.tools.desktop.web_browser import open_url_or_search as _browser_open_url
 from app.tools.desktop.window_manager import window_manager
@@ -128,6 +130,17 @@ def _format_tool_activity_text(tool_name: str, arguments: Any) -> str:
         return f"Jev reflex: {cmd}" if cmd else "Executing Jev reflex..."
     elif tool_name == "inspect_desktop_screen":
         return "Inspecting desktop screen..."
+    elif tool_name == "read_terminal_output":
+        return "Reading terminal output..."
+    elif tool_name == "read_browser_content":
+        return "Reading browser page content..."
+    elif tool_name == "wait_for_condition":
+        cond = args_dict.get("condition_type", "")
+        tgt = args_dict.get("target", "")
+        return f"Waiting for {cond} ({tgt})..." if cond else "Waiting for condition..."
+    elif tool_name == "await_background_task":
+        jid = args_dict.get("job_id", "")
+        return f"Awaiting background job {jid}..." if jid else "Waiting for background task..."
     else:
         if args_dict:
             first_val = next(iter(args_dict.values()))
@@ -164,8 +177,19 @@ Architecture & Operating Rules:
 3. You can ALWAYS call `inspect_desktop_screen` to see the screen, verify results, or locate interactive buttons and input fields with pixel coordinates whenever you are unsure or stuck.
 4. For simple window switching, app launching, or quick desktop actions, you can also call `ask_jev_reflex`.
 
+CRITICAL ANTI-HALLUCINATION & TASK SYNCHRONIZATION RULES:
+1. NEVER declare or hallucinate that a task is completed (e.g., claiming "I've opened the app", "The command is done", or "The page loaded") before the action has actually finished and verified!
+2. When launching an app or opening a page, verify the window appeared or call `wait_for_condition(condition_type='window_open', target=...)`.
+3. When running terminal builds, scripts, or tests, do NOT claim it finished until you see the exit code or prompt. Use `await_background_task` or `read_terminal_output` to check status.
+4. If a process, page, or build is still loading or running, give brief intermediate status ("Still loading...", "Running the build...", "Waiting for the window...") instead of prematurely ending the turn.
+5. If an action fails or times out, truthfully inform the user instead of pretending it succeeded.
+
 Available Tools:
-- `inspect_desktop_screen`: Capture a screenshot and inspect visible controls, coordinates, and active window.
+- `inspect_desktop_screen`: Capture and inspect the screen, including terminal text buffers, browser web pages, and UI controls.
+- `read_terminal_output`: Read visible text, prompts, errors, and commands from the active terminal window or background jobs.
+- `read_browser_content`: Read web page content, title, URL, and interactive elements from the active browser window.
+- `wait_for_condition`: Wait for a window to open/close, browser ready, or brief stabilization delay.
+- `await_background_task`: Wait for a background terminal job to complete and verify its exit code.
 - `focus_window`: Bring any application window to front by title or process name.
 - `list_open_windows`: List all currently open desktop windows.
 - `open_application`: Launch any app (e.g. calculator, notepad, chrome, code, spotify).
@@ -182,7 +206,7 @@ Spoken Guidelines:
 - Acknowledge actions quickly and naturally (e.g. "Looking at your screen now...", "Opening YouTube for you", "I'll run that command").
 - Keep conversational fillers moderate and brief—natural and polite without being repetitive or rambling.
 - Perform necessary tool actions step-by-step.
-- When finished, give a concise, friendly spoken confirmation summarizing the outcome.
+- When finished, give a concise, friendly spoken confirmation summarizing the verified outcome.
 - Never read raw code blocks, long stack traces, or raw JSON data aloud unless specifically asked.
 """
 
@@ -192,30 +216,45 @@ Spoken Guidelines:
 # ---------------------------------------------------------------------------
 
 @function_tool
-async def inspect_desktop_screen() -> str:
+async def inspect_desktop_screen(focus_hint: str = "") -> str:
     """Capture and inspect the current desktop screen.
     Call this whenever you need to see what is on the screen, locate interactive controls/buttons,
-    find coordinates to click, or when a task is stuck.
-    Returns the active window title, screen resolution, and all visible interactive elements with coordinates."""
-    logger.info("Gemini Live calling inspect_desktop_screen")
+    read terminal outputs, examine browser web pages, find coordinates to click, or when a task is stuck.
+    Returns the active window title, screen resolution, visible interactive elements with coordinates,
+    and interior dynamic content (terminal text buffers, browser DOM/page content, or documents)."""
+    logger.info("Gemini Live calling inspect_desktop_screen (hint: %s)", focus_hint)
     try:
+        active_win = window_manager.get_active_window()
+        active_title = active_win.title if active_win else "Unknown"
+        active_proc = active_win.process_name if active_win else "Unknown"
+
         annotated_img, tags = vision_engine.get_annotated_screenshot(max_marks=30)
-        # Save screenshot for web UI or user viewing
         try:
             annotated_img.save("screenshot.png")
         except Exception:
             pass
 
-        active_win = window_manager.get_active_window()
-        active_title = active_win.title if active_win else "Unknown"
-        active_proc = active_win.process_name if active_win else "Unknown"
-
         lines = [
-            f"Screen inspected: {active_title[:35]} ({annotated_img.width}x{annotated_img.height})",
-            f"Active Window: '{active_title}' ({active_proc})",
-            "Visible Interactive Controls:",
+            f"Screen inspected: {active_title[:40]} ({annotated_img.width}x{annotated_img.height})",
+            f"Active Window: '{active_title}' (Process: {active_proc})",
         ]
-        for t in tags[:25]:
+
+        # Extract interior content (Terminal text buffer or Browser page content)
+        content_info = await vision_engine.inspect_active_content(active_win, annotated_img, focus_hint=focus_hint)
+        if content_info.get("text"):
+            source = content_info.get("source", "Visual Inspection")
+            lines.append(f"\n--- Interior Content ({source}) ---")
+            lines.append(content_info["text"][:1800])
+            lines.append("--- End Interior Content ---\n")
+
+        cdp_elements = content_info.get("dom_elements", [])
+        if cdp_elements:
+            lines.append("Browser In-Page Elements (CDP):")
+            for el in cdp_elements[:15]:
+                lines.append(f" - [DOM] {el.get('role', 'element')}: '{el.get('text', '')[:40]}' selector={el.get('selector', '')}")
+
+        lines.append("Visible Interactive Controls:")
+        for t in tags[:20]:
             lines.append(f" - [Tag {t['tag']}] {t['type']}: '{t['name']}' at center coordinates {t['center']}")
 
         return "\n".join(lines)
@@ -223,6 +262,69 @@ async def inspect_desktop_screen() -> str:
     except Exception as exc:
         logger.error("Error inspecting screen: %s", exc)
         return f"Error capturing screen: {exc}"
+
+
+@function_tool
+async def read_terminal_output(lines: int = 35) -> str:
+    """Read the visible text buffer, recent commands, errors, and output from the active terminal window or background jobs.
+    Use this whenever you need to check command results, compiler errors, or shell status."""
+    logger.info("Gemini Live calling read_terminal_output")
+    recent_jobs = terminal_manager.background_jobs
+    job_outputs = []
+    for jid, job in list(recent_jobs.items())[-3:]:
+        job_outputs.append(f"Job {jid} ('{job.command}'): finished={job.is_finished} exit={job.exit_code}\n{''.join(job.output_buffer[-lines:])}")
+
+    active_win = window_manager.get_active_window()
+    proc = active_win.process_name.lower() if active_win else ""
+    is_terminal = proc in vision_engine.TERMINAL_PROCESSES or "terminal" in proc or "powershell" in proc or "pwsh" in proc or "cmd" in proc
+
+    if is_terminal:
+        img = screen_capture.capture_primary_monitor()
+        terminal_text = await vision_engine.extract_visual_content(img, window_type="terminal")
+        res = f"Active Terminal Window: '{active_win.title}' (Process: {proc})\nVisible Buffer:\n{terminal_text}"
+        if job_outputs:
+            res += "\n\nBackground Jobs Output:\n" + "\n".join(job_outputs)
+        return res
+
+    if job_outputs:
+        return "Background Jobs Output:\n" + "\n".join(job_outputs)
+
+    # If terminal is not active, try to find and inspect it
+    term = window_manager.find_window("terminal") or window_manager.find_window("powershell") or window_manager.find_window("cmd")
+    if term:
+        window_manager.bring_to_front(term.hwnd)
+        import asyncio
+        await asyncio.sleep(0.3)
+        img = screen_capture.capture_primary_monitor()
+        terminal_text = await vision_engine.extract_visual_content(img, window_type="terminal")
+        return f"Switched to Terminal: '{term.title}'\nVisible Buffer:\n{terminal_text}"
+
+    return f"Active window '{active_win.title if active_win else 'None'}' is not a terminal, and no background jobs found."
+
+
+@function_tool
+async def read_browser_content() -> str:
+    """Read the current web page content, title, URL, visible text, and interactive elements from the browser.
+    Use this to read articles, search results, forms, dialogs, or documentation in Chrome/Brave/Edge."""
+    logger.info("Gemini Live calling read_browser_content")
+    active_win = window_manager.get_active_window()
+
+    # Try CDP extraction first
+    cdp_content = await browser_manager.extract_page_content()
+    if cdp_content and cdp_content.get("text"):
+        elements_preview = "\n".join([f" - [DOM] {e.get('role')}: '{e.get('text')[:35]}' ({e.get('selector')})" for e in cdp_content.get("elements", [])[:15]])
+        return (
+            f"Browser Page (CDP): '{cdp_content.get('title')}'\n"
+            f"URL: {cdp_content.get('url')}\n"
+            f"Visible Content:\n{cdp_content.get('text')[:2000]}\n\n"
+            f"Interactive Elements:\n{elements_preview}"
+        )
+
+    # Fallback to visual multimodal extraction
+    img = screen_capture.capture_primary_monitor()
+    browser_text = await vision_engine.extract_visual_content(img, window_type="browser")
+    win_title = active_win.title if active_win else "Browser"
+    return f"Browser Window: '{win_title}'\nVisible Content:\n{browser_text}"
 
 
 @function_tool
@@ -335,6 +437,61 @@ async def patch_file(path: str, target: str, replacement: str) -> str:
 
 
 @function_tool
+async def wait_for_condition(condition_type: str, target: str, timeout: float = 10.0) -> str:
+    """Wait for a desktop condition before declaring success or proceeding.
+    Supported condition_types:
+    - 'window_open': wait until a window with title/process matching 'target' appears.
+    - 'window_close': wait until a window matching 'target' is closed.
+    - 'browser_ready': wait until active browser window or URL finishes initial load.
+    - 'delay' or 'sleep': wait for a specific duration in seconds (specified in 'target').
+    """
+    logger.info("Gemini Live calling wait_for_condition: type=%s target=%s timeout=%.1f", condition_type, target, timeout)
+    cond = condition_type.strip().lower()
+    t_out = min(max(float(timeout), 0.5), 30.0)
+
+    if cond in ("window_open", "open", "window"):
+        win = window_manager.wait_for_window(target, timeout=t_out)
+        if win:
+            return f"Verified: Window '{win.title}' (process: {win.process_name}) is open and active."
+        return f"Condition check timed out: Window matching '{target}' did not appear within {t_out}s."
+
+    elif cond in ("window_close", "close"):
+        closed = window_manager.wait_for_window_close(target, timeout=t_out)
+        if closed:
+            return f"Verified: Window matching '{target}' has closed."
+        return f"Condition check timed out: Window matching '{target}' did not close within {t_out}s."
+
+    elif cond in ("browser_ready", "page_ready"):
+        win = window_manager.wait_for_window(target if target else "chrome", timeout=t_out)
+        await asyncio.sleep(1.0)
+        return f"Verified: Browser window is ready."
+
+    elif cond in ("delay", "sleep"):
+        try:
+            sec = min(float(target), t_out)
+        except Exception:
+            sec = min(2.0, t_out)
+        await asyncio.sleep(sec)
+        return f"Waited {sec:.1f}s for desktop/application state to stabilize."
+
+    return f"Unknown condition_type '{condition_type}'. Supported: 'window_open', 'window_close', 'browser_ready', 'delay'."
+
+
+@function_tool
+async def await_background_task(job_id: str, timeout: float = 30.0) -> str:
+    """Wait for an ongoing background terminal job or build to complete and return its result.
+    Use this to prevent announcing completion prematurely while a build or script is still executing.
+    """
+    logger.info("Gemini Live calling await_background_task: job_id=%s timeout=%.1f", job_id, timeout)
+    t_out = min(max(float(timeout), 1.0), 60.0)
+    res = await terminal_manager.await_job(job_id, timeout=t_out)
+    if res.timed_out:
+        return f"Job '{job_id}' is STILL RUNNING after {t_out}s. Do NOT claim the task is done yet.\nRecent output:\n{res.stdout[-500:]}"
+    status_str = "SUCCEEDED" if res.exit_code == 0 else f"FAILED (exit code {res.exit_code})"
+    return f"Job '{job_id}' {status_str} in {res.duration_seconds}s.\nOutput:\n{res.output[:1200]}"
+
+
+@function_tool
 async def ask_jev_reflex(command: str) -> str:
     """Ask Jev System One to quickly execute a simple desktop action (e.g. switch window, launch app, basic hotkey) in ~150ms."""
     logger.info("Gemini Live delegating simple reflex to Jev: %s", command)
@@ -346,6 +503,10 @@ async def ask_jev_reflex(command: str) -> str:
 # List of all tools passed directly to the Gemini Live speech model
 SPEECH_MODEL_TOOLS = [
     inspect_desktop_screen,
+    read_terminal_output,
+    read_browser_content,
+    wait_for_condition,
+    await_background_task,
     focus_window,
     list_open_windows,
     open_application,
@@ -363,38 +524,14 @@ SPEECH_MODEL_TOOLS = [
 
 
 async def delegate_to_speech_model(task_instruction: str) -> dict[str, Any]:
-    """Ask the Gemini Live speech model to execute a complex task escalated by Jev."""
-    session = get_active_session()
-    if session is not None:
-        prompt = (
-            f"User instruction escalated by Jev System One: '{task_instruction}'.\n"
-            f"Please execute this task using your desktop tools. If you need to see what is on the screen, "
-            f"call `inspect_desktop_screen`. Acknowledge naturally with moderate filler, and speak a clear confirmation when complete."
-        )
-        try:
-            logger.info("Dispatching task instruction to Gemini Live speech session: '%s'", task_instruction)
-            session.generate_reply(instructions=prompt)
-            return {
-                "status": "success",
-                "tier": "speech_model_gemini_live",
-                "message": f"Delegated to Gemini Live speech model: '{task_instruction}'",
-                "session_active": True,
-            }
-        except Exception as exc:
-            logger.error("Failed to instruct Gemini Live session: %s", exc)
-            return {
-                "status": "error",
-                "tier": "speech_model_gemini_live",
-                "message": f"Speech session error: {exc}",
-                "session_active": True,
-            }
-
-    port = os.getenv("SERVER_PORT", str(settings.server_port))
+    """Execute a complex task escalated by Jev using the System Two LLM worker."""
+    from app.workers.llm_worker import llm_worker
+    loop = asyncio.get_running_loop()
+    res = await loop.run_in_executor(None, lambda: llm_worker.execute_task(task_instruction))
     return {
-        "status": "pending_voice_session",
-        "tier": "speech_model_gemini_live",
-        "message": f"Task requires Speech Model: '{task_instruction}'. Connect to the Web UI at http://127.0.0.1:{port} to speak or listen to Gemini Live.",
-        "session_active": False,
+        "status": "success",
+        "tier": "system_two_reasoning",
+        "message": res.get("summary", "Task executed."),
     }
 
 
@@ -601,12 +738,56 @@ async def entrypoint(ctx: JobContext):
                 text = msg.get("text", "").strip()
                 if text:
                     logger.info("Received typed command over data channel: %s", text)
-                    prompt = (
-                        f"User typed instruction: '{text}'.\n"
-                        f"Please execute this using your desktop tools. If you need to see the screen, "
-                        f"call `inspect_desktop_screen`. Acknowledge naturally with moderate filler, and speak a clear confirmation when complete."
+                    asyncio.create_task(
+                        publish_session_event({
+                            "type": "user_transcript",
+                            "text": text,
+                            "final": True,
+                        })
                     )
-                    session.generate_reply(instructions=prompt)
+                    asyncio.create_task(
+                        publish_session_event({
+                            "type": "model_activity",
+                            "phase": "start",
+                            "tool": "orchestrator",
+                            "text": f"Processing: '{text}'",
+                        })
+                    )
+
+                    async def _handle_typed_command(cmd_text: str):
+                        try:
+                            from app.workers.orchestrator import orchestrator
+                            res = await orchestrator.dispatch(cmd_text)
+                            reply = res.get("message", "Action completed.")
+                            act = res.get("action", "orchestrator")
+                            await publish_session_event({
+                                "type": "model_activity",
+                                "phase": "done",
+                                "status": "done",
+                                "tool": act,
+                                "text": reply,
+                            })
+                            await publish_session_event({
+                                "type": "agent_transcript",
+                                "text": reply,
+                                "final": True,
+                            })
+                        except Exception as err:
+                            logger.error("Error executing typed command: %s", err)
+                            await publish_session_event({
+                                "type": "model_activity",
+                                "phase": "done",
+                                "status": "error",
+                                "tool": "orchestrator",
+                                "text": f"Error: {err}",
+                            })
+                            await publish_session_event({
+                                "type": "agent_transcript",
+                                "text": f"Sorry, I encountered an error: {err}",
+                                "final": True,
+                            })
+
+                    asyncio.create_task(_handle_typed_command(text))
         except Exception as exc:
             logger.debug("Error handling data packet: %s", exc)
 

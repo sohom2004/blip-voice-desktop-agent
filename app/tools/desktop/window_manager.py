@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import time
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -83,12 +84,14 @@ class WindowManager:
         if win32gui.GetWindow(hwnd, win32con.GW_OWNER):
             return False
 
-        # Exclude windows with negligible dimensions
-        rect = win32gui.GetWindowRect(hwnd)
-        width = rect[2] - rect[0]
-        height = rect[3] - rect[1]
-        if width <= 80 or height <= 80:
-            return False
+        # Exclude windows with negligible dimensions (unless minimized)
+        is_iconic = bool(win32gui.IsIconic(hwnd))
+        if not is_iconic:
+            rect = win32gui.GetWindowRect(hwnd)
+            width = rect[2] - rect[0]
+            height = rect[3] - rect[1]
+            if width <= 80 or height <= 80:
+                return False
 
         # Check cloaked windows (Windows 10/11 virtual desktops or minimized UWP apps)
         is_cloaked = ctypes.c_int(0)
@@ -117,34 +120,53 @@ class WindowManager:
         active_hwnd = win32gui.GetForegroundWindow()
         windows: list[WindowInfo] = []
 
-        def enum_callback(hwnd: int, _lparam: Any):
-            if not self.is_valid_window(hwnd):
-                return True
+        hwnds: list[int] = []
 
-            title = win32gui.GetWindowText(hwnd).strip()
-            _, pid = win32process.GetWindowThreadProcessId(hwnd)
-            rect = win32gui.GetWindowRect(hwnd)
-            width = rect[2] - rect[0]
-            height = rect[3] - rect[1]
-            is_minimized = bool(win32gui.IsIconic(hwnd))
-            is_active = (hwnd == active_hwnd)
-
-            windows.append(
-                WindowInfo(
-                    hwnd=hwnd,
-                    title=title,
-                    process_name=self.get_process_name(pid),
-                    pid=pid,
-                    rect=rect,
-                    width=width,
-                    height=height,
-                    is_minimized=is_minimized,
-                    is_active=is_active,
-                )
-            )
+        def enum_callback(hwnd: int, _lparam: Any) -> bool:
+            hwnds.append(hwnd)
             return True
 
-        win32gui.EnumWindows(enum_callback, None)
+        from ctypes import wintypes
+        WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        c_proc = WNDENUMPROC(enum_callback)
+
+        DESKTOP_ALL = 0x01FF
+        h_default = self.user32.OpenDesktopW("Default", 0, False, DESKTOP_ALL)
+        if h_default:
+            self.user32.SetThreadDesktop(h_default)
+            self.user32.EnumDesktopWindows(h_default, c_proc, 0)
+        else:
+            self.user32.EnumWindows(c_proc, 0)
+
+        for hwnd in hwnds:
+            try:
+                if not self.is_valid_window(hwnd):
+                    continue
+
+                title = win32gui.GetWindowText(hwnd).strip()
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                rect = win32gui.GetWindowRect(hwnd)
+                is_minimized = bool(win32gui.IsIconic(hwnd))
+                width = rect[2] - rect[0]
+                height = rect[3] - rect[1]
+                is_active = (hwnd == active_hwnd)
+
+                windows.append(
+                    WindowInfo(
+                        hwnd=hwnd,
+                        title=title,
+                        process_name=self.get_process_name(pid),
+                        pid=pid,
+                        rect=rect,
+                        width=width,
+                        height=height,
+                        is_minimized=is_minimized,
+                        is_active=is_active,
+                    )
+                )
+            except Exception as exc:
+                logger.debug("Failed to inspect hwnd %s: %s", hwnd, exc)
+
         return windows
 
     def get_active_window(self) -> WindowInfo | None:
@@ -280,13 +302,32 @@ class WindowManager:
         win32gui.PostMessage(target.hwnd, win32con.WM_CLOSE, 0, 0)
         return True
 
-    def launch_app(self, app_name: str) -> bool:
-        """Launch an application or system utility in Windows."""
+    def wait_for_window(self, query: str | int, timeout: float = 5.0) -> WindowInfo | None:
+        """Poll until a window matching query appears or timeout expires."""
+        start = time.time()
+        while time.time() - start < timeout:
+            win = self.find_window(query)
+            if win:
+                return win
+            time.sleep(0.2)
+        return None
+
+    def wait_for_window_close(self, query: str | int, timeout: float = 5.0) -> bool:
+        """Poll until a window matching query is closed or timeout expires."""
+        start = time.time()
+        while time.time() - start < timeout:
+            win = self.find_window(query)
+            if not win:
+                return True
+            time.sleep(0.2)
+        return False
+
+    def launch_app(self, app_name: str, wait_for_window: bool = True, timeout: float = 3.5) -> bool:
+        """Launch an application and verify that its window opens and is focused."""
         import os
         import subprocess
 
         name_clean = app_name.strip().lower()
-        # Strip common action prefixes if present
         for prefix in ("open ", "launch ", "start "):
             if name_clean.startswith(prefix):
                 name_clean = name_clean[len(prefix):].strip()
@@ -317,7 +358,22 @@ class WindowManager:
         target = app_aliases.get(name_clean, name_clean)
         try:
             subprocess.Popen(f"start {target}", shell=True)
-            logger.info("Launched application: %s (target: %s)", app_name, target)
+            logger.info("Dispatched application launch: %s (target: %s)", app_name, target)
+
+            if not wait_for_window:
+                return True
+
+            # Poll for window appearance and bring to front
+            start_t = time.time()
+            while time.time() - start_t < timeout:
+                time.sleep(0.25)
+                matched = self.find_window(target) or self.find_window(name_clean)
+                if matched:
+                    self.bring_to_front(matched.hwnd)
+                    logger.info("Verified window opened and brought to front: '%s' (HWND %d)", matched.title, matched.hwnd)
+                    return True
+
+            logger.info("Launched %s (target %s), process started (window verification timed out after %.1fs)", app_name, target, timeout)
             return True
         except Exception as exc:
             logger.error("Failed to launch application %s: %s", app_name, exc)

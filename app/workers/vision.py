@@ -13,14 +13,44 @@ from pathlib import Path
 from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
+from google import genai
+from google.genai import types
+
+from app.config import settings
+from app.tools.browser.browser_manager import browser_manager
 from app.tools.desktop.screen_capture import screen_capture
 from app.tools.desktop.ui_automation import UIElement, ui_inspector
 
 logger = logging.getLogger(__name__)
 
+TERMINAL_PROCESSES = {
+    "windowsterminal.exe",
+    "powershell.exe",
+    "cmd.exe",
+    "pwsh.exe",
+    "conhost.exe",
+    "code.exe",
+    "alacritty.exe",
+    "wezterm-gui.exe",
+    "mintty.exe",
+    "kitty.exe",
+}
+
+BROWSER_PROCESSES = {
+    "chrome.exe",
+    "brave.exe",
+    "msedge.exe",
+    "firefox.exe",
+    "opera.exe",
+}
+
+
 
 class VisionGroundingEngine:
     """Manages visual grounding, element tagging, and coordinate mapping."""
+
+    TERMINAL_PROCESSES = TERMINAL_PROCESSES
+    BROWSER_PROCESSES = BROWSER_PROCESSES
 
     def __init__(self):
         pass
@@ -118,6 +148,116 @@ class VisionGroundingEngine:
         buffer = io.BytesIO()
         img_copy.save(buffer, format="JPEG", quality=quality)
         return buffer.getvalue()
+
+    async def extract_visual_content(
+        self,
+        image: Image.Image,
+        window_type: str = "general",
+        focus_hint: str = "",
+    ) -> str:
+        """Use fast Gemini multimodal vision to extract dynamic text from terminal, browser, or screen."""
+        if not settings.is_gemini_configured():
+            return "Gemini API key not configured for visual content extraction."
+
+        try:
+            client = genai.Client(api_key=settings.gemini_api_key or settings.google_api_key)
+            img_bytes = self.image_to_bytes(image, max_dim=1280)
+
+            if window_type == "terminal":
+                prompt = (
+                    "This is an image of a terminal/console window. Extract the exact visible text, "
+                    "including command prompt, current directory, recent commands, error messages, "
+                    "and outputs. Format concisely as plain text without commentary."
+                )
+            elif window_type == "browser":
+                prompt = (
+                    "This is an image of a web browser. Extract the visible page content: "
+                    "page title/URL if visible, main headings, paragraphs, visible search results or "
+                    "form fields, modal dialogs, and active alerts. Be direct and concise."
+                )
+            else:
+                prompt = (
+                    "Extract the primary dynamic text, messages, forms, or data displayed "
+                    "in the main content area of this application window. Summarize concisely."
+                )
+
+            if focus_hint:
+                prompt += f"\nSpecifically focus on: {focus_hint}"
+
+            def _call_model():
+                models_to_try = ["gemini-2.5-flash", "gemini-3.6-flash"]
+                for model_name in models_to_try:
+                    try:
+                        resp = client.models.generate_content(
+                            model=model_name,
+                            contents=[
+                                prompt,
+                                types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
+                            ],
+                        )
+                        if resp and resp.text:
+                            return resp.text.strip()
+                    except Exception as exc:
+                        logger.warning("Model %s failed for visual content extraction: %s", model_name, exc)
+                        continue
+                return "Unable to extract visual content from image."
+
+            import asyncio
+            return await asyncio.to_thread(_call_model)
+        except Exception as exc:
+            logger.error("Visual content extraction error: %s", exc)
+            return f"Error extracting visual content: {exc}"
+
+    async def inspect_active_content(
+        self,
+        active_window: Any | None = None,
+        screenshot_img: Image.Image | None = None,
+        focus_hint: str = "",
+    ) -> dict[str, Any]:
+        """Inspect dynamic interior content (DOM or visual OCR) of the currently active window."""
+        img = screenshot_img or screen_capture.capture_primary_monitor()
+        proc = active_window.process_name.lower() if active_window else ""
+
+        is_browser = proc in BROWSER_PROCESSES or "chrome" in proc or "brave" in proc or "edge" in proc
+        is_terminal = proc in TERMINAL_PROCESSES or "terminal" in proc or "powershell" in proc or "pwsh" in proc or "cmd" in proc
+
+        if is_browser:
+            # Try CDP first
+            cdp_data = await browser_manager.extract_page_content()
+            if cdp_data and cdp_data.get("text"):
+                return {
+                    "source": "Browser CDP",
+                    "window_type": "browser",
+                    "text": f"Page: {cdp_data.get('title')} ({cdp_data.get('url')})\n{cdp_data.get('text')}",
+                    "dom_elements": cdp_data.get("elements", []),
+                }
+            # Fallback to visual multimodal extraction
+            vis_text = await self.extract_visual_content(img, window_type="browser", focus_hint=focus_hint)
+            return {
+                "source": "Browser Multimodal Vision",
+                "window_type": "browser",
+                "text": vis_text,
+                "dom_elements": [],
+            }
+
+        if is_terminal:
+            vis_text = await self.extract_visual_content(img, window_type="terminal", focus_hint=focus_hint)
+            return {
+                "source": "Terminal Multimodal Vision",
+                "window_type": "terminal",
+                "text": vis_text,
+                "dom_elements": [],
+            }
+
+        # General window or desktop
+        vis_text = await self.extract_visual_content(img, window_type="general", focus_hint=focus_hint)
+        return {
+            "source": "Visual Multimodal Inspection",
+            "window_type": "general",
+            "text": vis_text,
+            "dom_elements": [],
+        }
+
 
 
 # Global vision grounding singleton

@@ -13,7 +13,9 @@ from google import genai
 from google.genai import types
 
 from app.config import settings
+from app.tools.browser.browser_manager import browser_manager
 from app.tools.desktop.mouse_keyboard import mouse_keyboard
+from app.tools.desktop.screen_capture import screen_capture
 from app.tools.desktop.ui_automation import ui_inspector
 from app.tools.desktop.window_manager import window_manager
 from app.tools.system.file_ops import file_manager
@@ -114,14 +116,94 @@ def patch_file(path: str, target: str, replacement: str) -> str:
     return f"Patch failed: {res.get('error')}"
 
 
-def inspect_screen() -> str:
-    """Inspect current screen, active window, and interactive UI controls with their pixel coordinates."""
-    active_hwnd, active_title, elements = ui_inspector.inspect_active_window(max_elements=30)
-    lines = [f"Active Window: '{active_title}' (HWND: {active_hwnd})", "Interactive Elements:"]
+def inspect_screen(focus_hint: str = "") -> str:
+    """Inspect current screen, active window, interactive UI controls, and interior content (terminal or browser)."""
+    active_win = window_manager.get_active_window()
+    active_hwnd = active_win.hwnd if active_win else None
+    active_title = active_win.title if active_win else "Unknown"
+    active_proc = active_win.process_name if active_win else "Unknown"
+
+    lines = [f"Active Window: '{active_title}' (Process: {active_proc}, HWND: {active_hwnd})"]
+
+    # Extract interior content (Terminal buffer or Browser DOM/text)
+    try:
+        import asyncio
+        loop = asyncio.get_event_loop() if not asyncio.get_event_loop().is_closed() else asyncio.new_event_loop()
+        content_info = loop.run_until_complete(
+            vision_engine.inspect_active_content(active_win, focus_hint=focus_hint)
+        )
+        if content_info.get("text"):
+            lines.append(f"\n--- Interior Content ({content_info.get('source')}) ---")
+            lines.append(content_info["text"][:1800])
+            lines.append("--- End Interior Content ---\n")
+    except Exception as exc:
+        logger.debug("Failed to inspect interior content: %s", exc)
+
+    # UI controls
+    _, _, elements = ui_inspector.inspect_active_window(max_elements=30)
+    lines.append("Interactive Elements:")
     for el in elements:
         clean_name = el.name.encode("ascii", errors="replace").decode("ascii").replace("?", "")
         lines.append(f" - [{el.id}] {el.control_type}: '{clean_name or el.control_type}' at center {el.center}")
     return "\n".join(lines)
+
+
+def read_terminal_output(lines: int = 35) -> str:
+    """Read the visible text buffer, recent commands, errors, and output from the active terminal window or background jobs."""
+    recent_jobs = terminal_manager.background_jobs
+    job_outputs = []
+    for jid, job in list(recent_jobs.items())[-3:]:
+        job_outputs.append(f"Job {jid} ('{job.command}'): finished={job.is_finished} exit={job.exit_code}\n{''.join(job.output_buffer[-lines:])}")
+
+    active_win = window_manager.get_active_window()
+    proc = active_win.process_name.lower() if active_win else ""
+    is_terminal = proc in vision_engine.TERMINAL_PROCESSES or "terminal" in proc or "powershell" in proc or "pwsh" in proc or "cmd" in proc
+
+    if is_terminal:
+        import asyncio
+        loop = asyncio.get_event_loop() if not asyncio.get_event_loop().is_closed() else asyncio.new_event_loop()
+        img = screen_capture.capture_primary_monitor()
+        terminal_text = loop.run_until_complete(
+            vision_engine.extract_visual_content(img, window_type="terminal")
+        )
+        res = f"Active Terminal Window: '{active_win.title}' (Process: {proc})\nVisible Buffer:\n{terminal_text}"
+        if job_outputs:
+            res += "\n\nBackground Jobs Output:\n" + "\n".join(job_outputs)
+        return res
+
+    if job_outputs:
+        return "Background Jobs Output:\n" + "\n".join(job_outputs)
+
+    return f"Active window '{active_win.title if active_win else 'None'}' is not a terminal, and no background jobs found."
+
+
+def read_browser_content() -> str:
+    """Read the current web page content, title, URL, visible text, and interactive elements from the browser."""
+    import asyncio
+    loop = asyncio.get_event_loop() if not asyncio.get_event_loop().is_closed() else asyncio.new_event_loop()
+
+    # Try CDP extraction first
+    try:
+        cdp_content = loop.run_until_complete(browser_manager.extract_page_content())
+        if cdp_content and cdp_content.get("text"):
+            elements_preview = "\n".join([f" - [DOM] {e.get('role')}: '{e.get('text')[:35]}' ({e.get('selector')})" for e in cdp_content.get("elements", [])[:15]])
+            return (
+                f"Browser Page (CDP): '{cdp_content.get('title')}'\n"
+                f"URL: {cdp_content.get('url')}\n"
+                f"Visible Content:\n{cdp_content.get('text')[:2000]}\n\n"
+                f"Interactive Elements:\n{elements_preview}"
+            )
+    except Exception:
+        pass
+
+    # Fallback to visual multimodal extraction
+    active_win = window_manager.get_active_window()
+    img = screen_capture.capture_primary_monitor()
+    browser_text = loop.run_until_complete(
+        vision_engine.extract_visual_content(img, window_type="browser")
+    )
+    win_title = active_win.title if active_win else "Browser"
+    return f"Browser Window: '{win_title}'\nVisible Content:\n{browser_text}"
 
 
 def open_url_or_search(query_or_url: str) -> str:
@@ -149,6 +231,62 @@ def open_application(app_name: str) -> str:
     return f"Failed to launch application: {app_name}"
 
 
+def wait_for_condition(condition_type: str, target: str, timeout: float = 10.0) -> str:
+    """Wait for a desktop condition before declaring success or proceeding.
+    Supported condition_types:
+    - 'window_open': wait until a window with title/process matching 'target' appears.
+    - 'window_close': wait until a window matching 'target' is closed.
+    - 'browser_ready': wait until active browser window or URL finishes initial load.
+    - 'delay' or 'sleep': wait for a specific duration in seconds (specified in 'target').
+    """
+    cond = condition_type.strip().lower()
+    t_out = min(max(float(timeout), 0.5), 30.0)
+
+    if cond in ("window_open", "open", "window"):
+        win = window_manager.wait_for_window(target, timeout=t_out)
+        if win:
+            return f"Verified: Window '{win.title}' (process: {win.process_name}) is now open and active."
+        return f"Condition check timed out: Window matching '{target}' did not appear within {t_out}s."
+
+    elif cond in ("window_close", "close"):
+        closed = window_manager.wait_for_window_close(target, timeout=t_out)
+        if closed:
+            return f"Verified: Window matching '{target}' has closed."
+        return f"Condition check timed out: Window matching '{target}' did not close within {t_out}s."
+
+    elif cond in ("browser_ready", "page_ready"):
+        import time
+        win = window_manager.wait_for_window(target if target else "chrome", timeout=t_out)
+        time.sleep(1.0)
+        return f"Verified: Browser window is ready."
+
+    elif cond in ("delay", "sleep"):
+        import time
+        try:
+            sec = min(float(target), t_out)
+        except Exception:
+            sec = min(2.0, t_out)
+        time.sleep(sec)
+        return f"Waited {sec:.1f}s for desktop/application state to stabilize."
+
+    return f"Unknown condition_type '{condition_type}'. Supported: 'window_open', 'window_close', 'browser_ready', 'delay'."
+
+
+def await_background_task(job_id: str, timeout: float = 30.0) -> str:
+    """Wait for an ongoing background terminal job or build to complete and return its result."""
+    t_out = min(max(float(timeout), 1.0), 60.0)
+    try:
+        loop = asyncio.get_event_loop() if not asyncio.get_event_loop().is_closed() else asyncio.new_event_loop()
+        res = loop.run_until_complete(terminal_manager.await_job(job_id, timeout=t_out))
+    except Exception as exc:
+        return f"Error awaiting job {job_id}: {exc}"
+
+    if res.timed_out:
+        return f"Job '{job_id}' is still running after {t_out}s. Do NOT claim the task is completed.\nRecent output:\n{res.stdout[-500:]}"
+    status_str = "SUCCEEDED" if res.exit_code == 0 else f"FAILED (exit code {res.exit_code})"
+    return f"Job '{job_id}' {status_str} in {res.duration_seconds}s.\nOutput:\n{res.output[:1200]}"
+
+
 # ---------------------------------------------------------------------------
 # Complex LLM Worker Class
 # ---------------------------------------------------------------------------
@@ -157,11 +295,13 @@ class ComplexLLMWorker:
     """System Two Worker managing multi-step reasoning and multimodal vision tasks."""
 
     def __init__(self):
-        self.client = genai.Client(api_key=settings.gemini_api_key)
+        self.client = genai.Client(api_key=settings.gemini_api_key or settings.google_api_key)
         self.model_name = settings.complex_llm_model
         self.tool_list = [
             open_url_or_search,
             open_application,
+            wait_for_condition,
+            await_background_task,
             focus_window,
             list_open_windows,
             click_mouse,
@@ -169,6 +309,8 @@ class ComplexLLMWorker:
             press_hotkey,
             scroll,
             execute_terminal_command,
+            read_terminal_output,
+            read_browser_content,
             read_file,
             write_file,
             patch_file,
@@ -209,7 +351,9 @@ class ComplexLLMWorker:
             "   or 'type_text' to enter data.\n"
             "3. If an application window needs to be brought up first, call 'focus_window'.\n"
             "4. For coding, file inspection, or command line tasks, use 'execute_terminal_command', 'write_file', or 'read_file'.\n"
-            "5. Execute necessary actions step-by-step using your tools, then provide a concise summary of what was accomplished."
+            "5. CRITICAL ANTI-HALLUCINATION: Do NOT claim a task is finished until verified. If waiting for an application to launch, "
+            "   page to load, or command to finish, call 'wait_for_condition' or 'await_background_task'.\n"
+            "6. Execute necessary actions step-by-step using your tools, then provide a concise summary of what was accomplished."
         )
 
         config = types.GenerateContentConfig(

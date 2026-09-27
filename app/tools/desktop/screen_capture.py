@@ -40,11 +40,25 @@ class ScreenCaptureManager:
     def capture_primary_monitor(self) -> Image.Image:
         """Capture the primary monitor as a PIL Image."""
         self._ensure_interactive_desktop()
-        with mss.MSS() as sct:
-            monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
-            sct_img = sct.grab(monitor)
-            img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
-            return img
+        try:
+            with mss.MSS() as sct:
+                monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+                sct_img = sct.grab(monitor)
+                img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+                return img
+        except Exception as exc:
+            logger.warning("Primary monitor capture failed: %s. Using fallback.", exc)
+            try:
+                from PIL import ImageGrab
+                return ImageGrab.grab()
+            except Exception:
+                w, h = 1920, 1080
+                try:
+                    import pyautogui
+                    w, h = pyautogui.size()
+                except Exception:
+                    pass
+                return Image.new("RGB", (w, h), color=(25, 25, 30))
 
     def capture_to_file(self, output_path: str | Path) -> Path:
         """Capture primary monitor and save to disk."""

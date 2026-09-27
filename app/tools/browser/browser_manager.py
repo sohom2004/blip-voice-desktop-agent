@@ -178,6 +178,32 @@ class BrowserManager:
             logger.error("Failed to extract DOM elements: %s", exc)
             return []
 
+    async def extract_page_content(self, max_elements: int = 30) -> dict[str, Any] | None:
+        """Extract current page title, URL, visible body text, and interactive elements via CDP."""
+        if not (self._active_page and not self._active_page.is_closed()):
+            if not await self.connect_cdp():
+                return None
+        page = self._active_page
+        if not page:
+            return None
+
+        try:
+            title = await page.title()
+            url = page.url
+            body_text = await page.evaluate(
+                "() => document.body ? document.body.innerText.replace(/\\s+/g, ' ').slice(0, 2500) : ''"
+            )
+            dom_elements = await self.extract_interactive_dom(max_elements=max_elements)
+            return {
+                "title": title,
+                "url": url,
+                "text": body_text.strip(),
+                "elements": [e.to_dict() for e in dom_elements],
+            }
+        except Exception as exc:
+            logger.debug("Failed to extract page content via CDP: %s", exc)
+            return None
+
     async def click_element(self, selector: str) -> dict[str, Any]:
         """Click element by selector or text."""
         page = await self.get_or_create_page()

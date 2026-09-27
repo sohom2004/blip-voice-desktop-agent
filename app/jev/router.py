@@ -167,12 +167,17 @@ class JevRouter:
 
         is_compound = (" and " in cmd_lower) and not is_direct_web
         is_deep_research = any(kw in cmd_lower for kw in ("find ", "look up ", "summarize ", "browse ", "analyze ", "inspect "))
+        question_starters = ("what", "how", "where", "which", "who", "why", "check", "show", "list", "read", "status", "tell me", "is", "are", "can", "do i")
+        is_question = any(cmd_lower.startswith(q + " ") or cmd_lower == q for q in question_starters)
+        if is_question and action_ans in ("task_complete", "escalate_to_llm"):
+            action_ans = "escalate_to_llm"
 
         # Determine escalation threshold
         should_escalate = (
             (action_ans == "escalate_to_llm" and not is_direct_web)
             or is_compound
             or is_deep_research
+            or is_question
             or (escalation_prob >= 0.65 and not is_direct_web)
             or (confidence_score < 0.6 and escalation_prob > 0.4 and not is_direct_web)
         )
