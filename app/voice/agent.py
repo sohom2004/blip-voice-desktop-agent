@@ -94,6 +94,15 @@ def _format_tool_activity_text(tool_name: str, arguments: Any) -> str:
     elif tool_name == "open_url_or_search":
         target = args_dict.get("query_or_url") or args_dict.get("url") or ""
         return f"Opening URL / search: {target}" if target else "Browsing web..."
+    elif tool_name == "browser_navigate":
+        target = args_dict.get("url_or_search") or args_dict.get("url") or ""
+        return f"Navigating browser: {target}" if target else "Navigating browser..."
+    elif tool_name == "browser_click":
+        target = args_dict.get("target") or ""
+        return f"Clicking browser element: {target}" if target else "Clicking browser element..."
+    elif tool_name == "browser_fill":
+        target = args_dict.get("target") or ""
+        return f"Typing into browser: {target}" if target else "Filling browser input..."
     elif tool_name == "click_mouse":
         x = args_dict.get("x")
         y = args_dict.get("y")
@@ -187,7 +196,10 @@ CRITICAL ANTI-HALLUCINATION & TASK SYNCHRONIZATION RULES:
 Available Tools:
 - `inspect_desktop_screen`: Capture and inspect the screen, including terminal text buffers, browser web pages, and UI controls.
 - `read_terminal_output`: Read visible text, prompts, errors, and commands from the active terminal window or background jobs.
-- `read_browser_content`: Read web page content, title, URL, and interactive elements from the active browser window.
+- `read_browser_content`: Read web page content, title, URL, and interactive elements from the browser.
+- `browser_navigate`: Navigate the browser to a specific URL or web search query directly.
+- `browser_click`: Click an interactive element in the browser by its DOM ID (e.g. 'dom_1') or selector.
+- `browser_fill`: Type text into an input field in the browser by its DOM ID (e.g. 'dom_1') or selector.
 - `wait_for_condition`: Wait for a window to open/close, browser ready, or brief stabilization delay.
 - `await_background_task`: Wait for a background terminal job to complete and verify its exit code.
 - `focus_window`: Bring any application window to front by title or process name.
@@ -309,15 +321,15 @@ async def read_browser_content() -> str:
     logger.info("Gemini Live calling read_browser_content")
     active_win = window_manager.get_active_window()
 
-    # Try CDP extraction first
+    # Try CDP / Playwright extraction first
     cdp_content = await browser_manager.extract_page_content()
     if cdp_content and cdp_content.get("text"):
-        elements_preview = "\n".join([f" - [DOM] {e.get('role')}: '{e.get('text')[:35]}' ({e.get('selector')})" for e in cdp_content.get("elements", [])[:15]])
+        elements_preview = "\n".join([f" - [{e.get('id')}] <{e.get('tag')}> {e.get('role')}: '{e.get('text')[:35]}' (selector: {e.get('selector')})" for e in cdp_content.get("elements", [])[:20]])
         return (
-            f"Browser Page (CDP): '{cdp_content.get('title')}'\n"
+            f"Browser Page (DOM/CDP): '{cdp_content.get('title')}'\n"
             f"URL: {cdp_content.get('url')}\n"
             f"Visible Content:\n{cdp_content.get('text')[:2000]}\n\n"
-            f"Interactive Elements:\n{elements_preview}"
+            f"Interactive Elements (use browser_click with ID like 'dom_1' or selector):\n{elements_preview}"
         )
 
     # Fallback to visual multimodal extraction
@@ -325,6 +337,38 @@ async def read_browser_content() -> str:
     browser_text = await vision_engine.extract_visual_content(img, window_type="browser")
     win_title = active_win.title if active_win else "Browser"
     return f"Browser Window: '{win_title}'\nVisible Content:\n{browser_text}"
+
+
+@function_tool
+async def browser_navigate(url_or_search: str) -> str:
+    """Navigate the browser to a specific URL or web search query.
+    Example: 'https://github.com' or 'python documentation'."""
+    logger.info("Gemini Live calling browser_navigate: %s", url_or_search)
+    res = await browser_manager.navigate(url_or_search)
+    if res.get("success"):
+        return f"Browser navigated to '{res.get('url')}'. Title: '{res.get('title')}'"
+    return f"Failed to navigate browser: {res.get('error')}"
+
+
+@function_tool
+async def browser_click(target: str) -> str:
+    """Click an interactive element in the browser by its DOM ID (e.g. 'dom_1', 'dom_2'),
+    CSS selector, or visible link/button text."""
+    logger.info("Gemini Live calling browser_click: %s", target)
+    res = await browser_manager.click_element(target)
+    if res.get("success"):
+        return f"Successfully clicked '{target}' in the browser."
+    return f"Failed to click '{target}' in the browser: {res.get('error')}"
+
+
+@function_tool
+async def browser_fill(target: str, text: str) -> str:
+    """Type text into an input field or textarea in the browser by its DOM ID (e.g. 'dom_1') or CSS selector."""
+    logger.info("Gemini Live calling browser_fill: %s -> %s", target, text)
+    res = await browser_manager.fill_element(target, text)
+    if res.get("success"):
+        return f"Successfully typed text into '{target}' in the browser."
+    return f"Failed to type into '{target}': {res.get('error')}"
 
 
 @function_tool
@@ -505,6 +549,9 @@ SPEECH_MODEL_TOOLS = [
     inspect_desktop_screen,
     read_terminal_output,
     read_browser_content,
+    browser_navigate,
+    browser_click,
+    browser_fill,
     wait_for_condition,
     await_background_task,
     focus_window,

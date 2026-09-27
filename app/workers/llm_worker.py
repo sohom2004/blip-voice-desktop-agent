@@ -29,6 +29,23 @@ logger = logging.getLogger(__name__)
 # Tool implementations provided to Gemini
 # ---------------------------------------------------------------------------
 
+def _run_async(coro):
+    """Safely execute an async coroutine from synchronous worker threads."""
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    if loop.is_closed():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    if loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+    return loop.run_until_complete(coro)
+
+
 def focus_window(query: str) -> str:
     """Bring an application window to the foreground by title, process name, or HWND."""
     success = window_manager.bring_to_front(query)
@@ -75,18 +92,9 @@ def scroll(direction: str = "down", amount: int = 5) -> str:
 def execute_terminal_command(command: str) -> str:
     """Execute a PowerShell command in the terminal and return its stdout and stderr."""
     try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-    if loop.is_running():
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(lambda: asyncio.run(terminal_manager.execute(command)))
-            res = future.result(timeout=35.0)
-    else:
-        res = loop.run_until_complete(terminal_manager.execute(command))
+        res = _run_async(terminal_manager.execute(command))
+    except Exception as exc:
+        return f"Error executing terminal command: {exc}"
 
     output = res.output
     return f"Exit code {res.exit_code} (took {res.duration_seconds}s):\n{output[:1500]}"
@@ -127,9 +135,7 @@ def inspect_screen(focus_hint: str = "") -> str:
 
     # Extract interior content (Terminal buffer or Browser DOM/text)
     try:
-        import asyncio
-        loop = asyncio.get_event_loop() if not asyncio.get_event_loop().is_closed() else asyncio.new_event_loop()
-        content_info = loop.run_until_complete(
+        content_info = _run_async(
             vision_engine.inspect_active_content(active_win, focus_hint=focus_hint)
         )
         if content_info.get("text"):
@@ -160,10 +166,8 @@ def read_terminal_output(lines: int = 35) -> str:
     is_terminal = proc in vision_engine.TERMINAL_PROCESSES or "terminal" in proc or "powershell" in proc or "pwsh" in proc or "cmd" in proc
 
     if is_terminal:
-        import asyncio
-        loop = asyncio.get_event_loop() if not asyncio.get_event_loop().is_closed() else asyncio.new_event_loop()
         img = screen_capture.capture_primary_monitor()
-        terminal_text = loop.run_until_complete(
+        terminal_text = _run_async(
             vision_engine.extract_visual_content(img, window_type="terminal")
         )
         res = f"Active Terminal Window: '{active_win.title}' (Process: {proc})\nVisible Buffer:\n{terminal_text}"
@@ -178,32 +182,62 @@ def read_terminal_output(lines: int = 35) -> str:
 
 
 def read_browser_content() -> str:
-    """Read the current web page content, title, URL, visible text, and interactive elements from the browser."""
-    import asyncio
-    loop = asyncio.get_event_loop() if not asyncio.get_event_loop().is_closed() else asyncio.new_event_loop()
-
-    # Try CDP extraction first
+    """Read current web page content, title, URL, visible text, and interactive elements from the browser."""
+    # Try BrowserManager (CDP or automated session) first
     try:
-        cdp_content = loop.run_until_complete(browser_manager.extract_page_content())
+        cdp_content = browser_manager.extract_page_content_sync()
         if cdp_content and cdp_content.get("text"):
-            elements_preview = "\n".join([f" - [DOM] {e.get('role')}: '{e.get('text')[:35]}' ({e.get('selector')})" for e in cdp_content.get("elements", [])[:15]])
+            elements_preview = "\n".join([f" - [{e.get('id')}] <{e.get('tag')}> {e.get('role')}: '{e.get('text')[:35]}' (selector: {e.get('selector')})" for e in cdp_content.get("elements", [])[:20]])
             return (
-                f"Browser Page (CDP): '{cdp_content.get('title')}'\n"
+                f"Browser Page (DOM/CDP): '{cdp_content.get('title')}'\n"
                 f"URL: {cdp_content.get('url')}\n"
                 f"Visible Content:\n{cdp_content.get('text')[:2000]}\n\n"
-                f"Interactive Elements:\n{elements_preview}"
+                f"Interactive Elements (use browser_click with ID like 'dom_1' or selector):\n{elements_preview}"
             )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("BrowserManager extract_page_content_sync failed: %s", exc)
 
     # Fallback to visual multimodal extraction
     active_win = window_manager.get_active_window()
     img = screen_capture.capture_primary_monitor()
-    browser_text = loop.run_until_complete(
+    browser_text = _run_async(
         vision_engine.extract_visual_content(img, window_type="browser")
     )
     win_title = active_win.title if active_win else "Browser"
     return f"Browser Window: '{win_title}'\nVisible Content:\n{browser_text}"
+
+
+def browser_navigate(url_or_search: str) -> str:
+    """Navigate the automated browser to a specific URL or web search query.
+    Example: 'https://github.com' or 'python documentation'.
+    """
+    res = browser_manager.navigate_sync(url_or_search)
+    if res.get("success"):
+        return f"Browser navigated to '{res.get('url')}'. Title: '{res.get('title')}'"
+    return f"Failed to navigate browser to '{url_or_search}': {res.get('error')}"
+
+
+def browser_click(target: str) -> str:
+    """Click an interactive element in the browser.
+    target can be:
+    - A DOM ID extracted from read_browser_content (e.g. 'dom_1', 'dom_2')
+    - A CSS selector (e.g. '#submit-btn', 'button[type=\"submit\"]')
+    - Visible button/link text (e.g. 'Sign In', 'Search')
+    """
+    res = browser_manager.click_element_sync(target)
+    if res.get("success"):
+        return f"Successfully clicked element '{target}' in browser."
+    return f"Failed to click element '{target}': {res.get('error')}"
+
+
+def browser_fill(target: str, text: str) -> str:
+    """Type text into an input field or textarea in the browser.
+    target can be a DOM ID (e.g. 'dom_1') or CSS selector (e.g. '#search', 'input[name=\"q\"]').
+    """
+    res = browser_manager.fill_element_sync(target, text)
+    if res.get("success"):
+        return f"Successfully typed text into element '{target}'."
+    return f"Failed to type into element '{target}': {res.get('error')}"
 
 
 def open_url_or_search(query_or_url: str) -> str:
@@ -276,8 +310,7 @@ def await_background_task(job_id: str, timeout: float = 30.0) -> str:
     """Wait for an ongoing background terminal job or build to complete and return its result."""
     t_out = min(max(float(timeout), 1.0), 60.0)
     try:
-        loop = asyncio.get_event_loop() if not asyncio.get_event_loop().is_closed() else asyncio.new_event_loop()
-        res = loop.run_until_complete(terminal_manager.await_job(job_id, timeout=t_out))
+        res = _run_async(terminal_manager.await_job(job_id, timeout=t_out))
     except Exception as exc:
         return f"Error awaiting job {job_id}: {exc}"
 
@@ -298,6 +331,10 @@ class ComplexLLMWorker:
         self.client = genai.Client(api_key=settings.gemini_api_key or settings.google_api_key)
         self.model_name = settings.complex_llm_model
         self.tool_list = [
+            browser_navigate,
+            browser_click,
+            browser_fill,
+            read_browser_content,
             open_url_or_search,
             open_application,
             wait_for_condition,
@@ -310,7 +347,6 @@ class ComplexLLMWorker:
             scroll,
             execute_terminal_command,
             read_terminal_output,
-            read_browser_content,
             read_file,
             write_file,
             patch_file,
@@ -344,16 +380,17 @@ class ComplexLLMWorker:
         system_instruction = (
             "You are the System Two desktop automation agent controlling a Windows PC.\n"
             "You have complete control over the desktop via tools: window management, mouse clicks at coordinates, "
-            "keyboard typing, hotkeys, terminal commands, and file operations.\n\n"
+            "keyboard typing, hotkeys, terminal commands, web browser automation, and file operations.\n\n"
             "Guidelines:\n"
             "1. Analyze the user task and current screen state.\n"
-            "2. When interacting with UI, use 'click_mouse' with the exact center coordinates of the target element, "
-            "   or 'type_text' to enter data.\n"
-            "3. If an application window needs to be brought up first, call 'focus_window'.\n"
-            "4. For coding, file inspection, or command line tasks, use 'execute_terminal_command', 'write_file', or 'read_file'.\n"
-            "5. CRITICAL ANTI-HALLUCINATION: Do NOT claim a task is finished until verified. If waiting for an application to launch, "
+            "2. For web browsing tasks, use 'browser_navigate' to open URLs/searches, 'read_browser_content' to read the page & interactive elements, "
+            "   and 'browser_click' / 'browser_fill' using unique element IDs like 'dom_1' or selectors.\n"
+            "3. When interacting with desktop native UI, use 'click_mouse' with coordinates or 'type_text'.\n"
+            "4. If an application window needs to be brought up first, call 'focus_window'.\n"
+            "5. For coding, file inspection, or command line tasks, use 'execute_terminal_command', 'write_file', or 'read_file'.\n"
+            "6. CRITICAL ANTI-HALLUCINATION: Do NOT claim a task is finished until verified. If waiting for an application to launch, "
             "   page to load, or command to finish, call 'wait_for_condition' or 'await_background_task'.\n"
-            "6. Execute necessary actions step-by-step using your tools, then provide a concise summary of what was accomplished."
+            "7. Execute necessary actions step-by-step using your tools, then provide a concise summary of what was accomplished."
         )
 
         config = types.GenerateContentConfig(
