@@ -11,9 +11,29 @@ from typing import Any
 
 from app.tools.desktop.ui_automation import ui_inspector
 from app.tools.desktop.window_manager import WindowInfo, window_manager
-from app.workers.vision import vision_engine
 
 logger = logging.getLogger(__name__)
+
+TERMINAL_PROCESSES = {
+    "windowsterminal.exe",
+    "powershell.exe",
+    "cmd.exe",
+    "pwsh.exe",
+    "conhost.exe",
+    "code.exe",
+    "alacritty.exe",
+    "wezterm-gui.exe",
+    "mintty.exe",
+    "kitty.exe",
+}
+
+BROWSER_PROCESSES = {
+    "chrome.exe",
+    "brave.exe",
+    "msedge.exe",
+    "firefox.exe",
+    "opera.exe",
+}
 
 
 class DesktopStateBuilder:
@@ -48,9 +68,9 @@ class DesktopStateBuilder:
         active_window_dict = None
         if active_win:
             proc = active_win.process_name.lower()
-            if proc in vision_engine.TERMINAL_PROCESSES or "terminal" in proc:
+            if proc in TERMINAL_PROCESSES or "terminal" in proc:
                 app_type = "terminal"
-            elif proc in vision_engine.BROWSER_PROCESSES or "chrome" in proc or "brave" in proc:
+            elif proc in BROWSER_PROCESSES or "chrome" in proc or "brave" in proc:
                 app_type = "browser"
             else:
                 app_type = "desktop_app"
@@ -78,8 +98,26 @@ class DesktopStateBuilder:
         # 2. Sample UI elements from active window if requested
         interactive_elements = []
         if inspect_controls and active_win:
-            elements = ui_inspector.inspect_window(active_win.hwnd, max_elements=max_controls)
-            interactive_elements = ui_inspector.format_for_jev(elements)
+            if app_type == "browser":
+                try:
+                    from app.tools.browser.browser_manager import browser_manager
+                    dom_elements = browser_manager.extract_interactive_dom_sync(max_elements=max_controls)
+                    for el in dom_elements:
+                        interactive_elements.append(
+                            {
+                                "id": el.id,
+                                "label": el.text or el.role or el.tag,
+                                "type": f"DOM_{el.tag.upper()}",
+                                "center": el.center,
+                                "is_dom": True,
+                            }
+                        )
+                except Exception as exc:
+                    logger.debug("Failed to extract DOM elements for Jev state: %s", exc)
+
+            if not interactive_elements:
+                elements = ui_inspector.inspect_window(active_win.hwnd, max_elements=max_controls)
+                interactive_elements = ui_inspector.format_for_jev(elements)
 
         return {
             "user_command": user_command.strip(),

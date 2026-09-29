@@ -13,6 +13,9 @@ from typing import Literal
 
 import pyautogui
 
+from app.tools.desktop.coordinates import coord_transformer
+from app.tools.desktop.dpi import enable_per_monitor_dpi_awareness
+
 logger = logging.getLogger(__name__)
 
 # Configure PyAutoGUI fail-safe (moving mouse to any corner raises exception)
@@ -21,10 +24,11 @@ pyautogui.PAUSE = 0.05
 
 
 class MouseKeyboardController:
-    """Controls mouse and keyboard inputs on Windows."""
+    """Controls mouse and keyboard inputs on Windows with DPI scaling awareness and assertions."""
 
     def __init__(self):
         self.user32 = ctypes.windll.user32
+        enable_per_monitor_dpi_awareness()
         self._ensure_interactive_desktop()
 
     def _ensure_interactive_desktop(self) -> bool:
@@ -40,9 +44,9 @@ class MouseKeyboardController:
         return False
 
     def get_screen_size(self) -> tuple[int, int]:
-        """Get the resolution of the primary monitor."""
+        """Get the physical resolution of the primary monitor."""
         self._ensure_interactive_desktop()
-        return pyautogui.size()
+        return coord_transformer.get_screen_dimensions()
 
     def get_mouse_position(self) -> tuple[int, int]:
         """Get the current cursor coordinates (x, y)."""
@@ -52,17 +56,42 @@ class MouseKeyboardController:
 
     def _clamp_coordinates(self, x: int, y: int) -> tuple[int, int]:
         """Clamp coordinates within visible screen boundary."""
-        screen_w, screen_h = self.get_screen_size()
-        clamped_x = max(0, min(x, screen_w - 1))
-        clamped_y = max(0, min(y, screen_h - 1))
-        return clamped_x, clamped_y
+        return coord_transformer.clamp(x, y)
 
     def move_to(self, x: int, y: int, duration: float = 0.0) -> tuple[int, int]:
-        """Move cursor to coordinate (x, y)."""
+        """Move cursor to coordinate (x, y) with clamping."""
         self._ensure_interactive_desktop()
         cx, cy = self._clamp_coordinates(x, y)
         pyautogui.moveTo(cx, cy, duration=duration)
         return (cx, cy)
+
+    def assert_cursor_position(
+        self,
+        expected_x: int,
+        expected_y: int,
+        target_rect: tuple[int, int, int, int] | None = None,
+    ) -> bool:
+        """Verify that current cursor position matches target coordinates or falls within bounding box."""
+        pos = pyautogui.position()
+        actual_x, actual_y = pos.x, pos.y
+
+        if target_rect:
+            left, top, right, bottom = target_rect
+            in_rect = coord_transformer.assert_within_bounds(actual_x, actual_y, target_rect)
+            if not in_rect:
+                logger.warning(
+                    "Cursor assertion failed: cursor at (%d, %d) outside expected bounding box (%d, %d, %d, %d)",
+                    actual_x, actual_y, left, top, right, bottom
+                )
+                return False
+            logger.info("Cursor asserted at (%d, %d) within target bounding box", actual_x, actual_y)
+            return True
+
+        dist = max(abs(actual_x - expected_x), abs(actual_y - expected_y))
+        if dist > 3:
+            logger.warning("Cursor assertion warning: cursor at (%d, %d), expected (%d, %d), delta=%d", actual_x, actual_y, expected_x, expected_y, dist)
+            return False
+        return True
 
     def click(
         self,
@@ -71,16 +100,39 @@ class MouseKeyboardController:
         button: Literal["left", "right", "middle"] = "left",
         clicks: int = 1,
         interval: float = 0.1,
+        target_rect: tuple[int, int, int, int] | None = None,
     ) -> tuple[int, int]:
-        """Click at coordinate (x, y) or at the current cursor position."""
+        """Click at coordinate (x, y) or at the current cursor position with position verification."""
         self._ensure_interactive_desktop()
         if x is not None and y is not None:
             cx, cy = self._clamp_coordinates(x, y)
+            pyautogui.moveTo(cx, cy)
+            time.sleep(0.01)
+            self.assert_cursor_position(cx, cy, target_rect=target_rect)
             pyautogui.click(x=cx, y=cy, button=button, clicks=clicks, interval=interval)
             return (cx, cy)
         else:
             pyautogui.click(button=button, clicks=clicks, interval=interval)
             return self.get_mouse_position()
+
+    def click_with_assertion(
+        self,
+        x: int,
+        y: int,
+        target_rect: tuple[int, int, int, int] | None = None,
+        button: Literal["left", "right", "middle"] = "left",
+        clicks: int = 1,
+    ) -> dict[str, Any]:
+        """Click at (x, y) and return diagnostic assertion payload."""
+        cx, cy = self.click(x=x, y=y, button=button, clicks=clicks, target_rect=target_rect)
+        pos = self.get_mouse_position()
+        return {
+            "x": cx,
+            "y": cy,
+            "actual_cursor": pos,
+            "asserted": target_rect is not None and coord_transformer.assert_within_bounds(pos[0], pos[1], target_rect),
+            "target_rect": target_rect,
+        }
 
     def double_click(self, x: int | None = None, y: int | None = None) -> tuple[int, int]:
         """Double click at coordinate (x, y) or current position."""

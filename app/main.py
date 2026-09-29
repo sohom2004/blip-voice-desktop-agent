@@ -18,10 +18,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from app.config import settings
+from app.tools.desktop.dpi import enable_per_monitor_dpi_awareness
 from app.tools.desktop.window_manager import window_manager
 from app.voice.token_service import generate_livekit_token
 from app.workers.orchestrator import orchestrator
 
+enable_per_monitor_dpi_awareness()
 logger = logging.getLogger(__name__)
 
 app = FastAPI(

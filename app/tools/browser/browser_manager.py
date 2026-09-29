@@ -98,19 +98,31 @@ class BrowserManager:
         async with self._lock:
             try:
                 await self._ensure_playwright()
-                self._browser = await self._playwright.chromium.connect_over_cdp(endpoint_url)
-                contexts = self._browser.contexts
-                if contexts:
-                    self._context = contexts[0]
-                    pages = self._context.pages
-                    self._active_page = pages[0] if pages else await self._context.new_page()
-                else:
-                    self._context = await self._browser.new_context()
-                    self._active_page = await self._context.new_page()
-                logger.info("Connected to browser over CDP at %s", endpoint_url)
-                return True
+                endpoints = [endpoint_url]
+                if "127.0.0.1" in endpoint_url:
+                    endpoints.append(endpoint_url.replace("127.0.0.1", "localhost"))
+                elif "localhost" in endpoint_url:
+                    endpoints.append(endpoint_url.replace("localhost", "127.0.0.1"))
+
+                for ep in endpoints:
+                    try:
+                        self._browser = await self._playwright.chromium.connect_over_cdp(ep)
+                        contexts = self._browser.contexts
+                        if contexts:
+                            self._context = contexts[0]
+                            pages = self._context.pages
+                            self._active_page = pages[0] if pages else await self._context.new_page()
+                        else:
+                            self._context = await self._browser.new_context()
+                            self._active_page = await self._context.new_page()
+                        logger.info("Connected to browser over CDP at %s", ep)
+                        return True
+                    except Exception as err:
+                        logger.debug("Could not connect to CDP at %s: %s", ep, err)
+                        continue
+                return False
             except Exception as exc:
-                logger.debug("Could not connect to CDP at %s: %s", endpoint_url, exc)
+                logger.debug("CDP connection error: %s", exc)
                 return False
 
     async def _launch_browser(self, headless: bool = False) -> bool:
@@ -322,6 +334,39 @@ class BrowserManager:
             except Exception:
                 return {"success": False, "error": str(exc), "target": target_clean}
 
+    async def _scroll_page(self, direction: str = "down", pixels: int = 500) -> dict[str, Any]:
+        """Scroll the web page viewport vertically by specified pixels."""
+        page = await self._get_or_create_page(auto_launch=False)
+        if not page or page.is_closed():
+            return {"success": False, "error": "No active browser page"}
+
+        scroll_y = pixels if direction.lower() == "down" else -pixels
+        try:
+            await page.evaluate(f"window.scrollBy({{ top: {scroll_y}, behavior: 'smooth' }});")
+            return {"success": True, "direction": direction, "pixels": pixels}
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
+
+    async def _inspect_browser_dom(self, max_elements: int = 40) -> dict[str, Any]:
+        """Extract live interactive DOM elements with assigned IDs and CSS selectors."""
+        page = await self._get_or_create_page(auto_launch=False)
+        if not page or page.is_closed():
+            return {"success": False, "error": "No active browser page. Use browser_navigate to open a page first."}
+
+        try:
+            title = await page.title()
+            url = page.url
+            dom_elements = await self._extract_interactive_dom(max_elements=max_elements)
+            return {
+                "success": True,
+                "title": title,
+                "url": url,
+                "count": len(dom_elements),
+                "elements": [e.to_dict() for e in dom_elements],
+            }
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
+
     async def _set_content(self, html: str):
         page = await self._get_or_create_page(auto_launch=True, headless=False)
         if page:
@@ -372,6 +417,12 @@ class BrowserManager:
     async def fill_element(self, target: str, text: str) -> dict[str, Any]:
         return await self._dispatch_async(self._fill_element(target, text))
 
+    async def scroll_page(self, direction: str = "down", pixels: int = 500) -> dict[str, Any]:
+        return await self._dispatch_async(self._scroll_page(direction, pixels))
+
+    async def inspect_browser_dom(self, max_elements: int = 40) -> dict[str, Any]:
+        return await self._dispatch_async(self._inspect_browser_dom(max_elements=max_elements))
+
     async def set_content(self, html: str):
         return await self._dispatch_async(self._set_content(html))
 
@@ -402,6 +453,12 @@ class BrowserManager:
 
     def fill_element_sync(self, target: str, text: str) -> dict[str, Any]:
         return self._dispatch(self._fill_element(target, text))
+
+    def scroll_page_sync(self, direction: str = "down", pixels: int = 500) -> dict[str, Any]:
+        return self._dispatch(self._scroll_page(direction, pixels))
+
+    def inspect_browser_dom_sync(self, max_elements: int = 40) -> dict[str, Any]:
+        return self._dispatch(self._inspect_browser_dom(max_elements=max_elements))
 
     def evaluate_js_sync(self, expression: str) -> Any:
         return self._dispatch(self._evaluate_js(expression))

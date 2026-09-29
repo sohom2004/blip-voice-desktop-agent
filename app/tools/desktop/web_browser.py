@@ -6,7 +6,15 @@ import webbrowser
 
 
 def open_url_or_search(query_or_url: str) -> str:
-    """Open a website URL or perform a web search in the user's default browser."""
+    """Open a website URL or perform a web search in the browser with Playwright/CDP integration."""
+    try:
+        from app.tools.browser.browser_manager import browser_manager
+        res = browser_manager.navigate_sync(query_or_url)
+        if res.get("success"):
+            return f"Navigated browser to '{res.get('url')}'. Title: '{res.get('title')}'"
+    except Exception:
+        pass
+
     import time
     from app.tools.desktop.window_manager import window_manager
 

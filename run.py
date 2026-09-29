@@ -25,6 +25,10 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# Enable Windows Per-Monitor DPI Awareness v2 early to align UIA, MSS capture, and PyAutoGUI coordinates
+from app.tools.desktop.dpi import enable_per_monitor_dpi_awareness
+enable_per_monitor_dpi_awareness()
+
 from app.cli.console import cli_app
 
 if __name__ == "__main__":

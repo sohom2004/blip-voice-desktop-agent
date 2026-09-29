@@ -16,6 +16,8 @@ from typing import Any
 import mss
 from PIL import Image
 
+from app.tools.desktop.dpi import enable_per_monitor_dpi_awareness
+
 logger = logging.getLogger(__name__)
 
 
@@ -24,6 +26,7 @@ class ScreenCaptureManager:
 
     def __init__(self):
         self.user32 = ctypes.windll.user32
+        enable_per_monitor_dpi_awareness()
 
     def _ensure_interactive_desktop(self) -> bool:
         """Attach calling thread to the interactive 'Default' desktop on WinSta0."""

@@ -242,23 +242,63 @@ class JevRouter:
                 state_builder.record_action("launch_app", {"command": user_command})
 
         elif action == "click_element" and decision.target_element_id:
-            # Look up element center coordinates from state
-            center = None
-            el_label = ""
-            for el in state["interactive_elements"]:
-                if el["id"] == decision.target_element_id:
-                    center = el.get("center")
-                    el_label = el.get("label", "")
+            if decision.target_element_id.startswith("dom_"):
+                from app.tools.browser.browser_manager import browser_manager
+                res = browser_manager.click_element_sync(decision.target_element_id)
+                if res.get("success"):
+                    result_message = f"Clicked DOM element [{decision.target_element_id}] in browser"
+                    state_builder.record_action("click_dom_element", {"id": decision.target_element_id})
+                else:
+                    success = False
+                    result_message = f"Failed to click DOM element {decision.target_element_id}: {res.get('error')}"
+            else:
+                from app.tools.desktop.ui_automation import ui_inspector
+                res = ui_inspector.click_element(decision.target_element_id)
+                if res.get("success"):
+                    method = res.get("method", "UIA")
+                    el_label = res.get("name") or decision.target_element_id
+                    result_message = f"Invoked '{el_label}' [{decision.target_element_id}] via {method}"
+                    state_builder.record_action("click_element", {"id": decision.target_element_id, "label": el_label, "method": method})
+                else:
+                    # Fallback to state coordinates if element was not in UIA inspector cache
+                    center = None
+                    el_label = ""
+                    for el in state["interactive_elements"]:
+                        if el["id"] == decision.target_element_id:
+                            center = el.get("center")
+                            el_label = el.get("label", "")
+                            break
+
+                    if center:
+                        cx, cy = center
+                        mouse_keyboard.click(cx, cy)
+                        result_message = f"Clicked '{el_label}' at ({cx}, {cy})"
+                        state_builder.record_action("click_element", {"label": el_label, "coords": [cx, cy]})
+                    else:
+                        success = False
+                        result_message = f"Could not find coordinates for element {decision.target_element_id}: {res.get('error')}"
+
+        elif action == "type_text":
+            text_to_type = user_command
+            for prefix in ("type ", "write ", "enter "):
+                if text_to_type.lower().startswith(prefix):
+                    text_to_type = text_to_type[len(prefix):].strip()
                     break
 
-            if center:
-                cx, cy = center
-                mouse_keyboard.click(cx, cy)
-                result_message = f"Clicked '{el_label}' at ({cx}, {cy})"
-                state_builder.record_action("click_element", {"label": el_label, "coords": [cx, cy]})
+            if decision.target_element_id and decision.target_element_id.startswith("dom_"):
+                from app.tools.browser.browser_manager import browser_manager
+                res = browser_manager.fill_element_sync(decision.target_element_id, text_to_type)
+                if res.get("success"):
+                    result_message = f"Typed '{text_to_type}' into DOM element {decision.target_element_id}"
+                    state_builder.record_action("type_dom_element", {"id": decision.target_element_id, "text": text_to_type})
+                else:
+                    mouse_keyboard.type_text(text_to_type)
+                    result_message = f"Typed '{text_to_type}'"
+                    state_builder.record_action("type_text", {"text": text_to_type})
             else:
-                success = False
-                result_message = f"Could not find coordinates for element {decision.target_element_id}"
+                mouse_keyboard.type_text(text_to_type)
+                result_message = f"Typed '{text_to_type}'"
+                state_builder.record_action("type_text", {"text": text_to_type})
 
         elif action == "open_web":
             from app.tools.desktop.web_browser import open_url_or_search
@@ -268,9 +308,20 @@ class JevRouter:
 
         elif action == "scroll_page":
             direction = "down" if "down" in user_command.lower() else "up"
-            mouse_keyboard.scroll(clicks=5, direction=direction)
-            result_message = f"Scrolled page {direction}"
-            state_builder.record_action("scroll", {"direction": direction})
+            if state.get("active_window", {}).get("app_type") == "browser":
+                from app.tools.browser.browser_manager import browser_manager
+                res = browser_manager.scroll_page_sync(direction=direction, pixels=500)
+                if res.get("success"):
+                    result_message = f"Scrolled web page {direction}"
+                    state_builder.record_action("scroll_web_page", {"direction": direction})
+                else:
+                    mouse_keyboard.scroll(clicks=5, direction=direction)
+                    result_message = f"Scrolled page {direction}"
+                    state_builder.record_action("scroll", {"direction": direction})
+            else:
+                mouse_keyboard.scroll(clicks=5, direction=direction)
+                result_message = f"Scrolled page {direction}"
+                state_builder.record_action("scroll", {"direction": direction})
 
         elif action == "keyboard_shortcut":
             # Basic common hotkeys

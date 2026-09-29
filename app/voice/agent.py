@@ -97,12 +97,20 @@ def _format_tool_activity_text(tool_name: str, arguments: Any) -> str:
     elif tool_name == "browser_navigate":
         target = args_dict.get("url_or_search") or args_dict.get("url") or ""
         return f"Navigating browser: {target}" if target else "Navigating browser..."
-    elif tool_name == "browser_click":
+    elif tool_name in ("browser_click", "click_dom_element"):
         target = args_dict.get("target") or ""
-        return f"Clicking browser element: {target}" if target else "Clicking browser element..."
-    elif tool_name == "browser_fill":
+        return f"Clicking browser DOM element: {target}" if target else "Clicking browser element..."
+    elif tool_name in ("browser_fill", "type_dom_element"):
         target = args_dict.get("target") or ""
         return f"Typing into browser: {target}" if target else "Filling browser input..."
+    elif tool_name == "inspect_browser_dom":
+        return "Inspecting browser DOM..."
+    elif tool_name == "scroll_web_page":
+        direction = args_dict.get("direction", "down")
+        return f"Scrolling web page {direction}..."
+    elif tool_name == "click_element":
+        elem = args_dict.get("element_id") or ""
+        return f"Clicking UI element: {elem}" if elem else "Clicking UI element..."
     elif tool_name == "click_mouse":
         x = args_dict.get("x")
         y = args_dict.get("y")
@@ -197,15 +205,18 @@ Available Tools:
 - `inspect_desktop_screen`: Capture and inspect the screen, including terminal text buffers, browser web pages, and UI controls.
 - `read_terminal_output`: Read visible text, prompts, errors, and commands from the active terminal window or background jobs.
 - `read_browser_content`: Read web page content, title, URL, and interactive elements from the browser.
-- `browser_navigate`: Navigate the browser to a specific URL or web search query directly.
-- `browser_click`: Click an interactive element in the browser by its DOM ID (e.g. 'dom_1') or selector.
-- `browser_fill`: Type text into an input field in the browser by its DOM ID (e.g. 'dom_1') or selector.
+- `inspect_browser_dom`: Inspect and extract live interactive DOM elements with assigned IDs ('dom_1', 'dom_2').
+- `browser_navigate`: Navigate the browser to a specific URL or web search query directly via Playwright/CDP.
+- `browser_click` / `click_dom_element`: Click an interactive DOM element in the browser by its ID (e.g. 'dom_1'), selector, or visible text.
+- `browser_fill` / `type_dom_element`: Type text into an input field in the browser by its DOM ID (e.g. 'dom_1') or selector.
+- `scroll_web_page`: Smoothly scroll the web page viewport up or down by pixels.
 - `wait_for_condition`: Wait for a window to open/close, browser ready, or brief stabilization delay.
 - `await_background_task`: Wait for a background terminal job to complete and verify its exit code.
 - `focus_window`: Bring any application window to front by title or process name.
 - `list_open_windows`: List all currently open desktop windows.
 - `open_application`: Launch any app (e.g. calculator, notepad, chrome, code, spotify).
 - `open_url_or_search`: Open a website URL or perform a web search in the default browser.
+- `click_element`: Click or invoke a desktop UI element by ID (e.g. 'elem_1') using direct UI Automation (preferred over click_mouse for native controls).
 - `click_mouse`: Click at exact (x, y) screen coordinates.
 - `type_text`: Type text into the focused control or active window.
 - `press_hotkey`: Keyboard shortcuts (ctrl+s, ctrl+c, ctrl+v, alt+tab, enter, etc.).
@@ -372,6 +383,47 @@ async def browser_fill(target: str, text: str) -> str:
 
 
 @function_tool
+async def inspect_browser_dom(max_elements: int = 40) -> str:
+    """Extract and list visible interactive DOM elements (buttons, inputs, links) from the active browser page with assigned IDs."""
+    logger.info("Gemini Live calling inspect_browser_dom")
+    res = await browser_manager.inspect_browser_dom(max_elements=max_elements)
+    if not res.get("success"):
+        return f"Failed to inspect browser DOM: {res.get('error')}"
+
+    lines = [
+        f"Browser DOM for '{res.get('title')}' ({res.get('url')}):",
+        f"Found {res.get('count')} interactive elements:",
+    ]
+    for el in res.get("elements", []):
+        text_preview = el.get("text", "")[:40]
+        lines.append(f" - [{el.get('id')}] <{el.get('tag')}> {el.get('role')}: '{text_preview}' (selector: {el.get('selector')})")
+    return "\n".join(lines)
+
+
+@function_tool
+async def click_dom_element(target: str) -> str:
+    """Click an interactive element in the browser by its DOM ID (e.g. 'dom_1'), CSS selector, or visible text."""
+    return await browser_click(target)
+
+
+@function_tool
+async def type_dom_element(target: str, text: str) -> str:
+    """Type text into an input field or textarea in the browser by its DOM ID (e.g. 'dom_1') or CSS selector."""
+    return await browser_fill(target, text)
+
+
+@function_tool
+async def scroll_web_page(direction: str = "down", pixels: int = 500) -> str:
+    """Scroll the web page viewport vertically by specified pixels (e.g. direction='down', pixels=500)."""
+    logger.info("Gemini Live calling scroll_web_page: direction=%s, pixels=%d", direction, pixels)
+    dir_clean = "down" if "down" in direction.lower() else "up"
+    res = await browser_manager.scroll_page(direction=dir_clean, pixels=pixels)
+    if res.get("success"):
+        return f"Scrolled web page {dir_clean} by {pixels}px."
+    return f"Failed to scroll web page: {res.get('error')}"
+
+
+@function_tool
 async def focus_window(query: str) -> str:
     """Bring an application window to the foreground by title, process name, or HWND."""
     logger.info("Gemini Live calling focus_window: %s", query)
@@ -409,10 +461,26 @@ async def open_url_or_search(query_or_url: str) -> str:
 
 
 @function_tool
+async def click_element(element_id: str) -> str:
+    """Click or invoke an interactive desktop UI element by its ID (e.g. 'elem_1') as discovered by inspect_desktop_screen.
+    Uses native Windows UI Automation patterns with asserted coordinate fallback, preventing DPI scaling errors.
+    """
+    logger.info("Gemini Live calling click_element: %s", element_id)
+    res = ui_inspector.click_element(element_id)
+    if res.get("success"):
+        method = res.get("method", "UIA")
+        name = res.get("element", {}).get("name") or element_id
+        return f"Successfully invoked '{name}' [{element_id}] via {method}."
+    return f"Failed to click element '{element_id}': {res.get('error')}"
+
+
+@function_tool
 async def click_mouse(x: int, y: int, button: str = "left") -> str:
     """Click at screen coordinates (x, y) with specified mouse button ('left' or 'right')."""
     logger.info("Gemini Live calling click_mouse at (%d, %d)", x, y)
-    cx, cy = mouse_keyboard.click(x=x, y=y, button=button)
+    from app.tools.desktop.coordinates import coord_transformer
+    screen_x, screen_y = coord_transformer.to_screen_coordinates(x, y)
+    cx, cy = mouse_keyboard.click(x=screen_x, y=screen_y, button=button)
     return f"Clicked mouse at ({cx}, {cy}) with button '{button}'."
 
 
@@ -549,15 +617,20 @@ SPEECH_MODEL_TOOLS = [
     inspect_desktop_screen,
     read_terminal_output,
     read_browser_content,
+    inspect_browser_dom,
     browser_navigate,
     browser_click,
     browser_fill,
+    click_dom_element,
+    type_dom_element,
+    scroll_web_page,
     wait_for_condition,
     await_background_task,
     focus_window,
     list_open_windows,
     open_application,
     open_url_or_search,
+    click_element,
     click_mouse,
     type_text,
     press_hotkey,

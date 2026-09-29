@@ -63,9 +63,23 @@ def list_open_windows() -> str:
     return "Open Windows:\n" + "\n".join(lines)
 
 
+def click_element(element_id: str) -> str:
+    """Click or invoke an interactive UI element by its ID (e.g. 'elem_1') as discovered by inspect_screen.
+    Uses native Windows UI Automation patterns with asserted coordinate fallback, preventing DPI and coordinate scaling errors.
+    """
+    res = ui_inspector.click_element(element_id)
+    if res.get("success"):
+        method = res.get("method", "UIA")
+        name = res.get("element", {}).get("name") or element_id
+        return f"Successfully invoked '{name}' [{element_id}] via {method}."
+    return f"Failed to click element '{element_id}': {res.get('error')}"
+
+
 def click_mouse(x: int, y: int, button: str = "left") -> str:
     """Click at screen coordinates (x, y) with specified mouse button ('left' or 'right')."""
-    cx, cy = mouse_keyboard.click(x=x, y=y, button=button)  # type: ignore
+    from app.tools.desktop.coordinates import coord_transformer
+    screen_x, screen_y = coord_transformer.to_screen_coordinates(x, y)
+    cx, cy = mouse_keyboard.click(x=screen_x, y=screen_y, button=button)  # type: ignore
     return f"Clicked mouse at ({cx}, {cy}) with button '{button}'."
 
 
@@ -240,6 +254,41 @@ def browser_fill(target: str, text: str) -> str:
     return f"Failed to type into element '{target}': {res.get('error')}"
 
 
+def inspect_browser_dom(max_elements: int = 40) -> str:
+    """Extract and list visible interactive DOM elements (buttons, inputs, links) from the active browser page with assigned IDs."""
+    res = browser_manager.inspect_browser_dom_sync(max_elements=max_elements)
+    if not res.get("success"):
+        return f"Failed to inspect browser DOM: {res.get('error')}"
+
+    lines = [
+        f"Browser DOM for '{res.get('title')}' ({res.get('url')}):",
+        f"Found {res.get('count')} interactive elements:",
+    ]
+    for el in res.get("elements", []):
+        text_preview = el.get("text", "")[:40]
+        lines.append(f" - [{el.get('id')}] <{el.get('tag')}> {el.get('role')}: '{text_preview}' (selector: {el.get('selector')})")
+    return "\n".join(lines)
+
+
+def click_dom_element(target: str) -> str:
+    """Click an interactive DOM element in the browser by DOM ID (e.g. 'dom_1'), CSS selector, or visible text."""
+    return browser_click(target)
+
+
+def type_dom_element(target: str, text: str) -> str:
+    """Type text into an input field or textarea in the browser by DOM ID (e.g. 'dom_1') or CSS selector."""
+    return browser_fill(target, text)
+
+
+def scroll_web_page(direction: str = "down", pixels: int = 500) -> str:
+    """Scroll the web page viewport vertically by specified pixels (e.g. direction='down', pixels=500)."""
+    dir_clean = "down" if "down" in direction.lower() else "up"
+    res = browser_manager.scroll_page_sync(direction=dir_clean, pixels=pixels)
+    if res.get("success"):
+        return f"Scrolled web page {dir_clean} by {pixels}px."
+    return f"Failed to scroll web page: {res.get('error')}"
+
+
 def open_url_or_search(query_or_url: str) -> str:
     """Open a website URL or perform a web search in the user's default browser."""
     import webbrowser
@@ -334,6 +383,10 @@ class ComplexLLMWorker:
             browser_navigate,
             browser_click,
             browser_fill,
+            inspect_browser_dom,
+            click_dom_element,
+            type_dom_element,
+            scroll_web_page,
             read_browser_content,
             open_url_or_search,
             open_application,
@@ -341,6 +394,7 @@ class ComplexLLMWorker:
             await_background_task,
             focus_window,
             list_open_windows,
+            click_element,
             click_mouse,
             type_text,
             press_hotkey,
@@ -379,13 +433,15 @@ class ComplexLLMWorker:
         # 2. System prompt
         system_instruction = (
             "You are the System Two desktop automation agent controlling a Windows PC.\n"
-            "You have complete control over the desktop via tools: window management, mouse clicks at coordinates, "
+            "You have complete control over the desktop via tools: window management, direct UI Automation element invocation, mouse clicks at coordinates, "
             "keyboard typing, hotkeys, terminal commands, web browser automation, and file operations.\n\n"
             "Guidelines:\n"
             "1. Analyze the user task and current screen state.\n"
             "2. For web browsing tasks, use 'browser_navigate' to open URLs/searches, 'read_browser_content' to read the page & interactive elements, "
             "   and 'browser_click' / 'browser_fill' using unique element IDs like 'dom_1' or selectors.\n"
-            "3. When interacting with desktop native UI, use 'click_mouse' with coordinates or 'type_text'.\n"
+            "3. When interacting with desktop native UI controls found via 'inspect_screen', PREFER 'click_element(element_id=\"elem_1\")'. "
+            "   This directly triggers native Windows UI Automation patterns and eliminates coordinate scaling and DPI miss errors. "
+            "   Only use 'click_mouse' if an element has no ID or is in an unannotated canvas.\n"
             "4. If an application window needs to be brought up first, call 'focus_window'.\n"
             "5. For coding, file inspection, or command line tasks, use 'execute_terminal_command', 'write_file', or 'read_file'.\n"
             "6. CRITICAL ANTI-HALLUCINATION: Do NOT claim a task is finished until verified. If waiting for an application to launch, "
