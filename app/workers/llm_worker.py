@@ -48,10 +48,11 @@ def _run_async(coro):
 
 def focus_window(query: str) -> str:
     """Bring an application window to the foreground by title, process name, or HWND."""
-    success = window_manager.bring_to_front(query)
-    if success:
-        return f"Successfully focused window matching '{query}'."
-    return f"Failed to find or focus window matching '{query}'."
+    from app.execution import DesktopAction, DesktopTarget, desktop_executor
+    res = desktop_executor.execute_sync(
+        DesktopAction("focus_window", target=DesktopTarget(window_query=query))
+    )
+    return res.message
 
 
 def list_open_windows() -> str:
@@ -67,12 +68,20 @@ def click_element(element_id: str) -> str:
     """Click or invoke an interactive UI element by its ID (e.g. 'elem_1') as discovered by inspect_screen.
     Uses native Windows UI Automation patterns with asserted coordinate fallback, preventing DPI and coordinate scaling errors.
     """
-    res = ui_inspector.click_element(element_id)
-    if res.get("success"):
-        method = res.get("method", "UIA")
-        name = res.get("element", {}).get("name") or element_id
-        return f"Successfully invoked '{name}' [{element_id}] via {method}."
-    return f"Failed to click element '{element_id}': {res.get('error')}"
+    from app.execution import DesktopAction, DesktopTarget, desktop_executor
+    res = desktop_executor.execute_sync(
+        DesktopAction("click_element", target=DesktopTarget(element_id=element_id))
+    )
+    return res.message
+
+
+def set_control_value(element_id: str, value: str) -> str:
+    """Directly set text into an interactive input control using UI Automation ValuePattern, without typing keystrokes."""
+    from app.execution import DesktopAction, DesktopTarget, desktop_executor
+    res = desktop_executor.execute_sync(
+        DesktopAction("set_value", target=DesktopTarget(element_id=element_id), params={"value": value})
+    )
+    return res.message
 
 
 def click_mouse(x: int, y: int, button: str = "left") -> str:
@@ -85,22 +94,29 @@ def click_mouse(x: int, y: int, button: str = "left") -> str:
 
 def type_text(text: str) -> str:
     """Type text into the currently active or focused input control."""
-    mouse_keyboard.type_text(text)
-    return f"Typed {len(text)} characters into active control."
+    from app.execution import DesktopAction, desktop_executor
+    res = desktop_executor.execute_sync(
+        DesktopAction("type_text", params={"text": text})
+    )
+    return res.message
 
 
 def press_hotkey(keys: str) -> str:
     """Press a key combination, e.g. 'ctrl+s', 'ctrl+c', 'ctrl+v', 'alt+tab', 'enter', 'esc'."""
-    key_list = [k.strip().lower() for k in keys.split("+")]
-    mouse_keyboard.hotkey(*key_list)
-    return f"Pressed hotkey combo: {'+'.join(key_list)}"
+    from app.execution import DesktopAction, desktop_executor
+    res = desktop_executor.execute_sync(
+        DesktopAction("keyboard_shortcut", params={"keys": keys})
+    )
+    return res.message
 
 
 def scroll(direction: str = "down", amount: int = 5) -> str:
     """Scroll mouse wheel ('up' or 'down')."""
-    dir_clean = "down" if "down" in direction.lower() else "up"
-    mouse_keyboard.scroll(clicks=amount, direction=dir_clean)  # type: ignore
-    return f"Scrolled {dir_clean} by {amount} clicks."
+    from app.execution import DesktopAction, desktop_executor
+    res = desktop_executor.execute_sync(
+        DesktopAction("scroll", params={"direction": direction, "amount": amount})
+    )
+    return res.message
 
 
 def execute_terminal_command(command: str) -> str:
@@ -395,6 +411,7 @@ class ComplexLLMWorker:
             focus_window,
             list_open_windows,
             click_element,
+            set_control_value,
             click_mouse,
             type_text,
             press_hotkey,

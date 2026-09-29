@@ -31,6 +31,7 @@ class WindowInfo:
     height: int
     is_minimized: bool
     is_active: bool
+    class_name: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -151,6 +152,11 @@ class WindowManager:
                 height = rect[3] - rect[1]
                 is_active = (hwnd == active_hwnd)
 
+                try:
+                    class_name = win32gui.GetClassName(hwnd)
+                except Exception:
+                    class_name = ""
+
                 windows.append(
                     WindowInfo(
                         hwnd=hwnd,
@@ -162,6 +168,7 @@ class WindowManager:
                         height=height,
                         is_minimized=is_minimized,
                         is_active=is_active,
+                        class_name=class_name,
                     )
                 )
             except Exception as exc:
@@ -179,6 +186,11 @@ class WindowManager:
         title = win32gui.GetWindowText(active_hwnd).strip()
         _, pid = win32process.GetWindowThreadProcessId(active_hwnd)
         rect = win32gui.GetWindowRect(active_hwnd)
+        try:
+            class_name = win32gui.GetClassName(active_hwnd)
+        except Exception:
+            class_name = ""
+
         return WindowInfo(
             hwnd=active_hwnd,
             title=title,
@@ -189,7 +201,71 @@ class WindowManager:
             height=rect[3] - rect[1],
             is_minimized=bool(win32gui.IsIconic(active_hwnd)),
             is_active=True,
+            class_name=class_name,
         )
+
+    def is_window_active(self, hwnd: int) -> bool:
+        """Check if the given window handle is currently the active foreground window."""
+        self._ensure_interactive_desktop()
+        return win32gui.GetForegroundWindow() == hwnd
+
+    def is_window_visible(self, hwnd: int) -> bool:
+        """Check if the given window handle exists and is visible."""
+        return bool(win32gui.IsWindow(hwnd) and win32gui.IsWindowVisible(hwnd))
+
+    def wait_for_window_state(
+        self,
+        hwnd: int,
+        state: str = "active",
+        timeout: float = 5.0,
+    ) -> bool:
+        """Wait for window to reach an expected state: 'active', 'visible', 'minimized', 'closed'."""
+        start_t = time.time()
+        while time.time() - start_t < timeout:
+            if state == "active":
+                if self.is_window_active(hwnd):
+                    return True
+            elif state == "visible":
+                if self.is_window_visible(hwnd):
+                    return True
+            elif state == "minimized":
+                if win32gui.IsWindow(hwnd) and win32gui.IsIconic(hwnd):
+                    return True
+            elif state == "closed":
+                if not win32gui.IsWindow(hwnd):
+                    return True
+            time.sleep(0.15)
+        return False
+
+    def find_window_by_spec(
+        self,
+        hwnd: int | None = None,
+        title: str | None = None,
+        process_name: str | None = None,
+        class_name: str | None = None,
+        pid: int | None = None,
+    ) -> WindowInfo | None:
+        """Find a window matching specific structured attributes."""
+        windows = self.list_windows()
+        for w in windows:
+            if hwnd is not None and w.hwnd != hwnd:
+                continue
+            if pid is not None and w.pid != pid:
+                continue
+            if process_name is not None:
+                p_clean = process_name.lower().replace(".exe", "")
+                w_proc = w.process_name.lower().replace(".exe", "")
+                if p_clean != w_proc and p_clean not in w_proc:
+                    continue
+            if class_name is not None:
+                if class_name.lower() != w.class_name.lower():
+                    continue
+            if title is not None:
+                t_clean = title.lower()
+                if t_clean != w.title.lower() and t_clean not in w.title.lower():
+                    continue
+            return w
+        return None
 
     def find_window(self, query: str | int) -> WindowInfo | None:
         """Find a window by HWND, exact title, substring match, or process name."""

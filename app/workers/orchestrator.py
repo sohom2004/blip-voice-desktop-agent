@@ -74,8 +74,10 @@ class MasterOrchestrator:
                 "tier": "system_one_reflex",
                 "action": decision.action_type,
                 "message": reflex_res.get("message", "Action completed."),
+                "backend_used": reflex_res.get("backend_used"),
                 "duration_seconds": elapsed,
                 "decision": decision.to_dict(),
+                "trace": reflex_res.get("trace", []),
             }
 
         # Step 3: Escalation Path to System Two (Complex LLM Worker with Vision & Tools)

@@ -211,15 +211,19 @@ class JevRouter:
                 "decision": decision.to_dict(),
             }
 
-        # Fast-Path Execution
+        # Fast-Path Execution via Hybrid DesktopExecutor
+        from app.execution.executor import desktop_executor
+        from app.execution.models import DesktopAction, DesktopTarget
+
         action = decision.action_type
-        result_message = ""
-        success = True
+        desktop_action: DesktopAction | None = None
 
         if action == "launch_app":
-            success = window_manager.launch_app(user_command)
-            result_message = f"Launched application for command: '{user_command}'"
-            state_builder.record_action("launch_app", {"command": user_command})
+            desktop_action = DesktopAction(
+                action_type="launch_app",
+                target=DesktopTarget(window_query=user_command),
+                params={"app_name": user_command},
+            )
 
         elif action == "focus_window":
             target_hwnd = None
@@ -230,53 +234,16 @@ class JevRouter:
                         target_hwnd = w["hwnd"]
                         target_title = w["title"]
                         break
-
-            if target_hwnd:
-                success = window_manager.bring_to_front(target_hwnd)
-                result_message = f"Focused window: '{target_title}'"
-                state_builder.record_action("focus_window", {"title": target_title, "hwnd": target_hwnd})
-            else:
-                # If window was not already open, launch it
-                success = window_manager.launch_app(user_command)
-                result_message = f"Window was not open; launched application: '{user_command}'"
-                state_builder.record_action("launch_app", {"command": user_command})
+            desktop_action = DesktopAction(
+                action_type="focus_window",
+                target=DesktopTarget(hwnd=target_hwnd, window_query=target_title or user_command),
+            )
 
         elif action == "click_element" and decision.target_element_id:
-            if decision.target_element_id.startswith("dom_"):
-                from app.tools.browser.browser_manager import browser_manager
-                res = browser_manager.click_element_sync(decision.target_element_id)
-                if res.get("success"):
-                    result_message = f"Clicked DOM element [{decision.target_element_id}] in browser"
-                    state_builder.record_action("click_dom_element", {"id": decision.target_element_id})
-                else:
-                    success = False
-                    result_message = f"Failed to click DOM element {decision.target_element_id}: {res.get('error')}"
-            else:
-                from app.tools.desktop.ui_automation import ui_inspector
-                res = ui_inspector.click_element(decision.target_element_id)
-                if res.get("success"):
-                    method = res.get("method", "UIA")
-                    el_label = res.get("name") or decision.target_element_id
-                    result_message = f"Invoked '{el_label}' [{decision.target_element_id}] via {method}"
-                    state_builder.record_action("click_element", {"id": decision.target_element_id, "label": el_label, "method": method})
-                else:
-                    # Fallback to state coordinates if element was not in UIA inspector cache
-                    center = None
-                    el_label = ""
-                    for el in state["interactive_elements"]:
-                        if el["id"] == decision.target_element_id:
-                            center = el.get("center")
-                            el_label = el.get("label", "")
-                            break
-
-                    if center:
-                        cx, cy = center
-                        mouse_keyboard.click(cx, cy)
-                        result_message = f"Clicked '{el_label}' at ({cx}, {cy})"
-                        state_builder.record_action("click_element", {"label": el_label, "coords": [cx, cy]})
-                    else:
-                        success = False
-                        result_message = f"Could not find coordinates for element {decision.target_element_id}: {res.get('error')}"
+            desktop_action = DesktopAction(
+                action_type="click_element",
+                target=DesktopTarget(element_id=decision.target_element_id),
+            )
 
         elif action == "type_text":
             text_to_type = user_command
@@ -284,83 +251,83 @@ class JevRouter:
                 if text_to_type.lower().startswith(prefix):
                     text_to_type = text_to_type[len(prefix):].strip()
                     break
-
-            if decision.target_element_id and decision.target_element_id.startswith("dom_"):
-                from app.tools.browser.browser_manager import browser_manager
-                res = browser_manager.fill_element_sync(decision.target_element_id, text_to_type)
-                if res.get("success"):
-                    result_message = f"Typed '{text_to_type}' into DOM element {decision.target_element_id}"
-                    state_builder.record_action("type_dom_element", {"id": decision.target_element_id, "text": text_to_type})
-                else:
-                    mouse_keyboard.type_text(text_to_type)
-                    result_message = f"Typed '{text_to_type}'"
-                    state_builder.record_action("type_text", {"text": text_to_type})
-            else:
-                mouse_keyboard.type_text(text_to_type)
-                result_message = f"Typed '{text_to_type}'"
-                state_builder.record_action("type_text", {"text": text_to_type})
+            desktop_action = DesktopAction(
+                action_type="type_text",
+                target=DesktopTarget(element_id=decision.target_element_id),
+                params={"text": text_to_type},
+            )
 
         elif action == "open_web":
-            from app.tools.desktop.web_browser import open_url_or_search
-            target = extract_web_target(user_command)
-            result_message = open_url_or_search(target)
-            state_builder.record_action("open_web", {"target": target})
+            target_url = extract_web_target(user_command)
+            desktop_action = DesktopAction(
+                action_type="open_web",
+                params={"url": target_url},
+            )
 
         elif action == "scroll_page":
             direction = "down" if "down" in user_command.lower() else "up"
-            if state.get("active_window", {}).get("app_type") == "browser":
-                from app.tools.browser.browser_manager import browser_manager
-                res = browser_manager.scroll_page_sync(direction=direction, pixels=500)
-                if res.get("success"):
-                    result_message = f"Scrolled web page {direction}"
-                    state_builder.record_action("scroll_web_page", {"direction": direction})
-                else:
-                    mouse_keyboard.scroll(clicks=5, direction=direction)
-                    result_message = f"Scrolled page {direction}"
-                    state_builder.record_action("scroll", {"direction": direction})
-            else:
-                mouse_keyboard.scroll(clicks=5, direction=direction)
-                result_message = f"Scrolled page {direction}"
-                state_builder.record_action("scroll", {"direction": direction})
+            desktop_action = DesktopAction(
+                action_type="scroll",
+                params={"direction": direction},
+            )
 
         elif action == "keyboard_shortcut":
-            # Basic common hotkeys
             cmd_lower = user_command.lower()
+            keys = "enter"
             if "save" in cmd_lower:
-                mouse_keyboard.hotkey("ctrl", "s")
-                result_message = "Pressed Ctrl+S (Save)"
+                keys = "ctrl+s"
             elif "copy" in cmd_lower:
-                mouse_keyboard.hotkey("ctrl", "c")
-                result_message = "Pressed Ctrl+C (Copy)"
+                keys = "ctrl+c"
             elif "paste" in cmd_lower:
-                mouse_keyboard.hotkey("ctrl", "v")
-                result_message = "Pressed Ctrl+V (Paste)"
+                keys = "ctrl+v"
             elif "new tab" in cmd_lower:
-                mouse_keyboard.hotkey("ctrl", "t")
-                result_message = "Pressed Ctrl+T (New Tab)"
+                keys = "ctrl+t"
             elif "close" in cmd_lower and "tab" in cmd_lower:
-                mouse_keyboard.hotkey("ctrl", "w")
-                result_message = "Pressed Ctrl+W (Close Tab)"
-            else:
-                result_message = "Executed keyboard shortcut"
+                keys = "ctrl+w"
+            desktop_action = DesktopAction(
+                action_type="keyboard_shortcut",
+                params={"keys": keys},
+            )
 
         elif action == "terminal_command":
-            # Strip preamble if any and execute in powershell
-            cmd = user_command.strip()
-            res = await terminal_manager.execute(cmd)
-            success = (res.exit_code == 0)
-            result_message = f"Terminal exit code {res.exit_code}: {res.stdout.strip()[:200]}"
+            desktop_action = DesktopAction(
+                action_type="terminal_command",
+                params={"command": user_command.strip()},
+            )
 
         elif action == "task_complete":
-            result_message = "No desktop action required."
+            return {
+                "status": "success",
+                "action": action,
+                "message": "No desktop action required.",
+                "decision": decision.to_dict(),
+            }
 
-        else:
-            result_message = f"Executed {action}"
+        if desktop_action:
+            exec_res = await desktop_executor.execute(desktop_action)
+            success = exec_res.success
+            result_message = exec_res.message
+            state_builder.record_action(
+                action,
+                {
+                    "command": user_command,
+                    "backend": exec_res.backend_used.value if exec_res.backend_used else None,
+                },
+            )
+            return {
+                "status": "success" if success else "failed",
+                "action": action,
+                "message": result_message,
+                "backend_used": exec_res.backend_used.value if exec_res.backend_used else None,
+                "duration_seconds": exec_res.duration_seconds,
+                "decision": decision.to_dict(),
+                "trace": exec_res.trace,
+            }
 
         return {
-            "status": "success" if success else "failed",
+            "status": "success",
             "action": action,
-            "message": result_message,
+            "message": f"Executed {action}",
             "decision": decision.to_dict(),
         }
 
