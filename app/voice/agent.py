@@ -38,7 +38,9 @@ from app.tools.desktop.screen_capture import screen_capture
 from app.tools.desktop.ui_automation import ui_inspector
 from app.tools.desktop.web_browser import open_url_or_search as _browser_open_url
 from app.tools.desktop.window_manager import window_manager
+from app.tools.system.developer_ops import dev_ops
 from app.tools.system.file_ops import file_manager
+from app.tools.system.memory import memory_store
 from app.tools.system.terminal import terminal_manager
 from app.voice.events import get_active_room, publish_event, set_active_room
 from app.workers.vision import vision_engine
@@ -191,8 +193,19 @@ You speak naturally with the user and have complete control of their computer th
 Architecture & Operating Rules:
 1. You (Gemini Live speech-to-speech) perform all complex tasks, planning, coding, file operations, web exploration, and visual desktop grounding.
 2. Jev (System One) handles fast, high-confidence navigation and simple reflexes, and delegates complex tasks to you.
-3. You can ALWAYS call `inspect_desktop_screen` to see the screen, verify results, or locate interactive buttons and input fields with pixel coordinates whenever you are unsure or stuck.
-4. For simple window switching, app launching, or quick desktop actions, you can also call `ask_jev_reflex`.
+3. You have an Autonomous Chain-of-Thought (CoT) Reasoning Worker (powered by Nemotron 3.5 Lightning via OpenRouter). You can call `execute_autonomous_task` whenever an open-ended multi-step workflow needs autonomous resolution.
+4. You can ALWAYS call `inspect_desktop_screen` to see the screen, verify results, or locate interactive buttons and input fields with pixel coordinates whenever you are unsure or stuck.
+5. For simple window switching, app launching, or quick desktop actions, you can also call `ask_jev_reflex`.
+
+CRITICAL ZERO-CLARIFICATION & AUTONOMOUS DISCOVERY CONTRACT:
+1. NEVER ASK QUESTIONS FOR DISCOVERABLE INFO: When the user asks you to open a folder, run an app in a directory, or interact with a file, NEVER ask them questions like "Where should I open it?", "What is the path?", or "I can't figure this out". You have full autonomous tools to find everything!
+2. AUTONOMOUS PATH RESOLUTION: If the user says "open antigravity terminal in <project/folder>", do NOT ask for the path. Immediately call `find_directory(query='<project>')` and then call `open_terminal_in_directory(path=..., command='agy')` or delegate to `execute_autonomous_task`.
+3. MULTI-INSTANCE NUMBERED WINDOWS: Multiple instances of the same application are canonically indexed:
+   - Terminals: 'terminal 1', 'terminal 2', 'terminal 3'
+   - File Explorers: 'explorer 1', 'explorer 2'
+   - Browsers: 'browser 1', 'browser 2'
+   - Code Editors: 'code 1', 'editor 1'
+   When the user says "terminal 1", "switch to terminal 2", "write X into terminal 3", directly call `focus_window("terminal 2")` or `write_to_indexed_window(query="terminal 3", text="X")`.
 
 CRITICAL ANTI-HALLUCINATION & TASK SYNCHRONIZATION RULES:
 1. NEVER declare or hallucinate that a task is completed (e.g., claiming "I've opened the app", "The command is done", or "The page loaded") before the action has actually finished and verified!
@@ -202,6 +215,12 @@ CRITICAL ANTI-HALLUCINATION & TASK SYNCHRONIZATION RULES:
 5. If an action fails or times out, truthfully inform the user instead of pretending it succeeded.
 
 Available Tools:
+- `find_directory`: Autonomously find folder or workspace paths matching a query without asking the user.
+- `open_terminal_in_directory`: Launch a new terminal in a specific directory and optionally execute a startup command.
+- `write_to_indexed_window`: Directly focus and type text/commands into a numbered window ('terminal 1', 'terminal 2', 'explorer 1').
+- `execute_autonomous_task`: Run multi-step autonomous tasks via the Nemotron 3.5 Lightning CoT reasoning worker.
+- `focus_window`: Bring any application window to front by indexed alias ('terminal 1', 'terminal 2', 'explorer 1') or title.
+- `list_open_windows`: List all currently open desktop windows with their numbered canonical aliases.
 - `inspect_desktop_screen`: Capture and inspect the screen, including terminal text buffers, browser web pages, and UI controls.
 - `read_terminal_output`: Read visible text, prompts, errors, and commands from the active terminal window or background jobs.
 - `read_browser_content`: Read web page content, title, URL, and interactive elements from the browser.
@@ -212,11 +231,9 @@ Available Tools:
 - `scroll_web_page`: Smoothly scroll the web page viewport up or down by pixels.
 - `wait_for_condition`: Wait for a window to open/close, browser ready, or brief stabilization delay.
 - `await_background_task`: Wait for a background terminal job to complete and verify its exit code.
-- `focus_window`: Bring any application window to front by title or process name.
-- `list_open_windows`: List all currently open desktop windows.
 - `open_application`: Launch any app (e.g. calculator, notepad, chrome, code, spotify).
 - `open_url_or_search`: Open a website URL or perform a web search in the default browser.
-- `click_element`: Click or invoke a desktop UI element by ID (e.g. 'elem_1') using direct UI Automation (preferred over click_mouse for native controls).
+- `click_element`: Click or invoke a desktop UI element by ID (e.g. 'elem_1') using direct UI Automation.
 - `click_mouse`: Click at exact (x, y) screen coordinates.
 - `type_text`: Type text into the focused control or active window.
 - `press_hotkey`: Keyboard shortcuts (ctrl+s, ctrl+c, ctrl+v, alt+tab, enter, etc.).
@@ -226,7 +243,7 @@ Available Tools:
 - `ask_jev_reflex`: Ask Jev System One to quickly perform simple navigation / desktop reflexes.
 
 Spoken Guidelines:
-- Acknowledge actions quickly and naturally (e.g. "Looking at your screen now...", "Opening YouTube for you", "I'll run that command").
+- Acknowledge actions quickly and naturally (e.g. "Looking for the folder and opening your terminal...", "Switching to Terminal 2", "Typing that now").
 - Keep conversational fillers moderate and brief—natural and polite without being repetitive or rambling.
 - Perform necessary tool actions step-by-step.
 - When finished, give a concise, friendly spoken confirmation summarizing the verified outcome.
@@ -435,11 +452,11 @@ async def focus_window(query: str) -> str:
 
 @function_tool
 async def list_open_windows() -> str:
-    """List all currently open, visible application windows on the desktop."""
+    """List all currently open, visible application windows on the desktop with their numbered canonical aliases."""
     windows = window_manager.list_windows()
     if not windows:
         return "No visible windows found."
-    lines = [f"- [{w.hwnd}] {w.process_name}: '{w.title}' (active={w.is_active})" for w in windows]
+    lines = [f"- [{w.alias}] {w.process_name} (HWND: {w.hwnd}, active={w.is_active}): '{w.title}'" for w in windows]
     return "Open Windows:\n" + "\n".join(lines)
 
 
@@ -612,6 +629,124 @@ async def ask_jev_reflex(command: str) -> str:
     return res.get("message", "Executed reflex.")
 
 
+@function_tool
+async def find_directory(query: str) -> str:
+    """Autonomously search disk for a folder, project, or workspace path matching a query name without asking the user.
+    Use this whenever the user mentions a project or folder without specifying the full path.
+    """
+    logger.info("Gemini Live calling find_directory: %s", query)
+    res = file_manager.find_directory(query)
+    if res.get("success"):
+        return f"Found directory: {res.get('best_match')} (score: {res.get('score')})"
+    return f"Directory not found for query '{query}': {res.get('error')}"
+
+
+@function_tool
+async def open_terminal_in_directory(path: str, command: str = "") -> str:
+    """Open a new Windows Terminal window in the designated folder path and optionally run a command (e.g. 'agy', 'npm run dev').
+    Always use this instead of asking the user where or how to open the terminal.
+    """
+    logger.info("Gemini Live calling open_terminal_in_directory: path=%s command=%s", path, command)
+    res = terminal_manager.open_terminal_window(path, command=command if command else None)
+    if res.get("success"):
+        return f"Successfully opened terminal in '{res.get('directory')}' ({res.get('window')})."
+    return f"Failed to open terminal in '{path}': {res.get('error')}"
+
+
+@function_tool
+async def write_to_indexed_window(query: str, text: str, press_enter: bool = True) -> str:
+    """Focus a specific numbered window (e.g. 'terminal 1', 'terminal 2', 'explorer 1') and type commands or text into it."""
+    logger.info("Gemini Live calling write_to_indexed_window: target=%s text=%s", query, text)
+    res = window_manager.send_input_to_window(query, text=text, press_enter=press_enter)
+    if res.get("success"):
+        return f"Typed '{text}' into [{res.get('window')}]."
+    return f"Failed to write to window '{query}': {res.get('error')}"
+
+
+@function_tool
+async def execute_autonomous_task(task_instruction: str) -> str:
+    """Execute a complex multi-step task via the Autonomous Chain-of-Thought (CoT) Worker (Nemotron 3.5 Lightning).
+    Use this for open-ended or ambiguous tasks (e.g. 'open antigravity in my voice agent folder', 'setup project X in terminal 2')
+    where autonomous path resolution, window disambiguation, and sequential execution are needed without asking the user.
+    """
+    logger.info("Gemini Live delegating to autonomous CoT worker: %s", task_instruction)
+    from app.workers.cot_worker import cot_worker
+    loop = asyncio.get_running_loop()
+    res = await loop.run_in_executor(None, lambda: cot_worker.execute_task(task_instruction))
+    return res.get("summary", "Autonomous task completed.")
+
+
+@function_tool
+async def remember_fact(key: str, value: str, category: str = "general") -> str:
+    """Store or update a user fact, preference, or project path in persistent memory across sessions.
+    Example: key='my project', value='D:\\OneDrive\\Desktop\\automations\\voice-desktop', category='project'.
+    """
+    logger.info("Gemini Live storing memory: %s -> %s", key, value)
+    return memory_store.remember(key, value, category=category)
+
+
+@function_tool
+async def recall_facts(query: str = "") -> str:
+    """Search and recall persistent memories, preferences, or project shortcuts.
+    Pass an empty query to recall all stored facts.
+    """
+    logger.info("Gemini Live recalling memory: query=%s", query)
+    memories = memory_store.recall(query)
+    if not memories:
+        return f"No memories found matching '{query}'."
+    lines = [f"- [{m.get('category')}] {m.get('key')}: {m.get('value')}" for m in memories]
+    return "Stored Memories:\n" + "\n".join(lines)
+
+
+@function_tool
+async def get_directory_tree(dir_path: str = ".", max_depth: int = 2) -> str:
+    """Render a clean visual ASCII directory tree of a project or folder."""
+    logger.info("Gemini Live inspecting directory tree: %s (depth %d)", dir_path, max_depth)
+    return dev_ops.get_directory_tree(dir_path=dir_path, max_depth=max_depth)
+
+
+@function_tool
+async def grep_code(query: str, dir_path: str = ".", file_pattern: str = "*.*") -> str:
+    """Fast regex or keyword search across files in a codebase, returning filenames and matching line contents."""
+    logger.info("Gemini Live grepping code: '%s' in %s", query, dir_path)
+    return dev_ops.grep_code(query=query, dir_path=dir_path, file_pattern=file_pattern)
+
+
+@function_tool
+async def get_git_status(repo_path: str = ".") -> str:
+    """Inspect Git branch, modified/uncommitted files, and recent commit message."""
+    logger.info("Gemini Live inspecting git status: %s", repo_path)
+    return dev_ops.get_git_status(repo_path=repo_path)
+
+
+@function_tool
+async def execute_python_code(code: str) -> str:
+    """Execute a Python script or expression in an isolated environment and return the output."""
+    logger.info("Gemini Live executing Python code snippet.")
+    return dev_ops.execute_python_code(code=code)
+
+
+@function_tool
+async def find_process_by_port(port: int) -> str:
+    """Find which process is listening on a network port (e.g. 8000, 3000, 5173)."""
+    logger.info("Gemini Live inspecting port: %d", port)
+    res = dev_ops.find_process_by_port(port=port)
+    if res.get("success"):
+        procs = ", ".join([f"{p['process_name']} (PID {p['pid']})" for p in res.get("processes", [])])
+        return f"Port {port} is used by: {procs}"
+    return res.get("message") or res.get("error", "Not found.")
+
+
+@function_tool
+async def kill_process(name_or_pid: str) -> str:
+    """Terminate a running application or process by name (e.g. 'node', 'python') or PID."""
+    logger.info("Gemini Live killing process: %s", name_or_pid)
+    res = dev_ops.kill_process(name_or_pid)
+    if res.get("success"):
+        return f"Successfully killed: {res.get('killed')}"
+    return f"Failed to kill process '{name_or_pid}': {res.get('error')}"
+
+
 # List of all tools passed directly to the Gemini Live speech model
 SPEECH_MODEL_TOOLS = [
     inspect_desktop_screen,
@@ -628,6 +763,18 @@ SPEECH_MODEL_TOOLS = [
     await_background_task,
     focus_window,
     list_open_windows,
+    find_directory,
+    open_terminal_in_directory,
+    write_to_indexed_window,
+    execute_autonomous_task,
+    remember_fact,
+    recall_facts,
+    get_directory_tree,
+    grep_code,
+    get_git_status,
+    execute_python_code,
+    find_process_by_port,
+    kill_process,
     open_application,
     open_url_or_search,
     click_element,

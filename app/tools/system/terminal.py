@@ -242,6 +242,57 @@ class TerminalManager:
             timed_out=False,
         )
 
+    def open_terminal_window(
+        self,
+        directory: str | Path,
+        command: str | None = None,
+        title: str | None = None,
+    ) -> dict[str, Any]:
+        """Launch an interactive Windows Terminal window in the designated directory and optionally execute a command."""
+        target_dir = Path(directory).resolve()
+        if not target_dir.is_dir():
+            return {
+                "success": False,
+                "error": f"Directory does not exist: {directory}",
+            }
+
+        import shutil
+        wt_path = shutil.which("wt.exe") or shutil.which("wt")
+
+        clean_dir = str(target_dir).replace('"', '`"')
+        if wt_path:
+            if command:
+                escaped_cmd = command.replace('"', '`"')
+                cmd_line = f'wt.exe -d "{clean_dir}" powershell.exe -NoExit -Command "{escaped_cmd}"'
+            else:
+                cmd_line = f'wt.exe -d "{clean_dir}"'
+        else:
+            if command:
+                escaped_cmd = command.replace('"', '`"')
+                cmd_line = f'powershell.exe -NoExit -Command "Set-Location \'{clean_dir}\'; {escaped_cmd}"'
+            else:
+                cmd_line = f'powershell.exe -NoExit -Command "Set-Location \'{clean_dir}\'"'
+
+        try:
+            subprocess.Popen(f"start {cmd_line}", shell=True)
+            logger.info("Launched terminal in %s (cmd: %s)", target_dir, command)
+
+            # Wait briefly and find the newly active/focused terminal window
+            time.sleep(0.7)
+            from app.tools.desktop.window_manager import window_manager
+            win = window_manager.find_window("terminal 1")
+
+            return {
+                "success": True,
+                "directory": str(target_dir),
+                "command_executed": command,
+                "window": win.alias if win else "terminal 1",
+                "hwnd": win.hwnd if win else None,
+                "title": win.title if win else "Windows Terminal",
+            }
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
+
 
 # Global terminal singleton
 terminal_manager = TerminalManager()

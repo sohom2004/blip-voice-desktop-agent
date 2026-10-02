@@ -80,12 +80,32 @@ class MasterOrchestrator:
                 "trace": reflex_res.get("trace", []),
             }
 
-        # Step 3: Escalation Path to System Two (Complex LLM Worker with Vision & Tools)
+        # Step 3: Escalation Path to System Two (Autonomous CoT Worker with Tools)
+        loop = asyncio.get_running_loop()
+        if settings.is_openrouter_configured():
+            logger.info("Escalating to Autonomous CoT Worker (Nemotron 3.5 Lightning via OpenRouter)")
+            self._emit_event("system_two_reasoning_start", {"model": settings.cot_reasoning_model, "backend": "openrouter"})
+            from app.workers.cot_worker import cot_worker
+            worker_res = await loop.run_in_executor(
+                None,
+                lambda: cot_worker.execute_task(user_command)
+            )
+            elapsed = round(time.perf_counter() - start_time, 3)
+            summary = worker_res.get("summary", "Task executed.")
+            self._emit_event("task_done", {"tier": "system_two_cot_reasoning", "duration": elapsed, "result": worker_res})
+            return {
+                "tier": "system_two_cot_reasoning",
+                "action": "autonomous_cot_execution",
+                "message": summary,
+                "duration_seconds": elapsed,
+                "decision": decision.to_dict(),
+                "trace": worker_res.get("trace", []),
+            }
+
         logger.info("Escalating to System Two Complex LLM Worker (reason: complex reasoning / vision needed)")
         self._emit_event("system_two_reasoning_start", {"model": settings.complex_llm_model})
 
         from app.workers.llm_worker import llm_worker
-        loop = asyncio.get_running_loop()
         worker_res = await loop.run_in_executor(
             None,
             lambda: llm_worker.execute_task(user_command, initial_state=state)

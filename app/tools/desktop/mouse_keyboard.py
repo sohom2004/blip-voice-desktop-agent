@@ -181,6 +181,15 @@ class MouseKeyboardController:
         normalized_keys = [k.lower().strip() for k in keys]
         pyautogui.hotkey(*normalized_keys)
 
+    def press_hotkey(self, keys: list[str] | str) -> None:
+        """Alias for hotkey/press_key accepting a list of key names or single key."""
+        if isinstance(keys, str):
+            self.press_key(keys)
+        elif len(keys) == 1:
+            self.press_key(keys[0])
+        else:
+            self.hotkey(*keys)
+
 
 # Global controller singleton
 mouse_keyboard = MouseKeyboardController()

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import re
 import threading
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -574,10 +575,18 @@ class UIAutomationInspector:
                 return el
             if name and el.name.lower() == name.lower():
                 return el
-            if name and name.lower() in el.name.lower():
-                if control_type and el.control_type.lower() != control_type.lower():
-                    continue
-                return el
+            if name:
+                n_clean = name.strip().lower()
+                # For short names (<=3 chars like 'OK', 'Go'), require word boundary to avoid substring collisions (e.g. 'Bookmark')
+                if len(n_clean) <= 3:
+                    if re.search(rf"\b{re.escape(n_clean)}\b", el.name.lower()):
+                        if control_type and el.control_type.lower() != control_type.lower():
+                            continue
+                        return el
+                elif n_clean in el.name.lower():
+                    if control_type and el.control_type.lower() != control_type.lower():
+                        continue
+                    return el
             if control_type and el.control_type.lower() == control_type.lower():
                 if not name and not automation_id:
                     return el

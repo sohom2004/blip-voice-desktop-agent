@@ -7,7 +7,9 @@ using Win32 APIs with multi-desktop station awareness.
 from __future__ import annotations
 
 import ctypes
+from ctypes import wintypes
 import logging
+import re
 import time
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -32,6 +34,9 @@ class WindowInfo:
     is_minimized: bool
     is_active: bool
     class_name: str = ""
+    category: str = "app"
+    index: int = 1
+    alias: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -115,19 +120,56 @@ class WindowManager:
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             return "unknown"
 
+    @staticmethod
+    def classify_window(process_name: str, class_name: str, title: str) -> str:
+        """Classify a window into a canonical user-facing application category."""
+        proc = (process_name or "").lower().replace(".exe", "")
+        cls = (class_name or "").lower()
+        ttl = (title or "").lower()
+
+        # 1. Terminals
+        terminal_procs = {
+            "windowsterminal", "powershell", "pwsh", "cmd", "conhost",
+            "alacritty", "wezterm-gui", "wezterm", "kitty", "bash", "wsl",
+        }
+        if proc in terminal_procs or "cascadia" in cls or "consolewindowclass" in cls:
+            return "terminal"
+        if "command prompt" in ttl or "powershell" in ttl or "terminal" in ttl or "pwsh" in ttl:
+            return "terminal"
+
+        # 2. File Explorer
+        if proc == "explorer" and ("cabinetwclass" in cls or "explorewclass" in cls or "file explorer" in ttl):
+            return "explorer"
+
+        # 3. Code Editors / IDEs
+        code_procs = {"code", "cursor", "antigravity", "devenv", "pycharm64", "idea64", "webstorm"}
+        if proc in code_procs:
+            return "code"
+
+        # 4. Text Editors
+        editor_procs = {"notepad", "notepad++", "sublime_text"}
+        if proc in editor_procs:
+            return "editor"
+
+        # 5. Web Browsers
+        browser_procs = {"chrome", "msedge", "brave", "firefox", "opera", "vivaldi", "arc"}
+        if proc in browser_procs:
+            return "browser"
+
+        return proc or "app"
+
     def list_windows(self) -> list[WindowInfo]:
-        """Enumerate all open, visible top-level application windows."""
+        """List all visible top-level windows in active Z-order, with canonical aliases."""
         self._ensure_interactive_desktop()
-        active_hwnd = win32gui.GetForegroundWindow()
         windows: list[WindowInfo] = []
+        active_hwnd = win32gui.GetForegroundWindow()
 
         hwnds: list[int] = []
 
-        def enum_callback(hwnd: int, _lparam: Any) -> bool:
+        def enum_callback(hwnd, _):
             hwnds.append(hwnd)
             return True
 
-        from ctypes import wintypes
         WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
         c_proc = WNDENUMPROC(enum_callback)
 
@@ -157,11 +199,12 @@ class WindowManager:
                 except Exception:
                     class_name = ""
 
+                proc_name = self.get_process_name(pid)
                 windows.append(
                     WindowInfo(
                         hwnd=hwnd,
                         title=title,
-                        process_name=self.get_process_name(pid),
+                        process_name=proc_name,
                         pid=pid,
                         rect=rect,
                         width=width,
@@ -173,6 +216,16 @@ class WindowManager:
                 )
             except Exception as exc:
                 logger.debug("Failed to inspect hwnd %s: %s", hwnd, exc)
+
+        # Assign indexed categories and aliases in Z-order (topmost active = 1)
+        category_counts: dict[str, int] = {}
+        for w in windows:
+            cat = self.classify_window(w.process_name, w.class_name, w.title)
+            count = category_counts.get(cat, 0) + 1
+            category_counts[cat] = count
+            w.category = cat
+            w.index = count
+            w.alias = f"{cat} {count}"
 
         return windows
 
@@ -268,12 +321,12 @@ class WindowManager:
         return None
 
     def find_window(self, query: str | int) -> WindowInfo | None:
-        """Find a window by HWND, exact title, substring match, or process name."""
+        """Find a window by HWND, indexed alias ('terminal 1', 'terminal 2', 'explorer 1'), exact title, substring match, or process name."""
         windows = self.list_windows()
         if not windows:
             return None
 
-        # Check by HWND if integer or numeric
+        # Check by HWND if integer
         if isinstance(query, int):
             for w in windows:
                 if w.hwnd == query:
@@ -289,23 +342,86 @@ class WindowManager:
                 if w.hwnd == hwnd_val:
                     return w
 
-        # 1. Exact title match (case-insensitive)
+        # Normalize written and ordinal numbers (e.g. "terminal one" -> "terminal 1", "second terminal" -> "terminal 2")
+        num_map = {
+            "first": "1", "second": "2", "third": "3", "fourth": "4", "fifth": "5",
+            "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+        }
+        # Handle "first terminal" -> "terminal 1"
+        for word, digit in num_map.items():
+            query_str = re.sub(rf"\b{word}\s+([a-z_]+)\b", rf"\1 {digit}", query_str)
+            query_str = re.sub(rf"\b{word}\b", digit, query_str)
+
+        # 1. Match indexed alias pattern (e.g. "terminal 1", "terminal 2", "explorer 1", "browser 2")
+        idx_match = re.match(r"^([a-z_]+)\s*(\d+)$", query_str)
+        if idx_match:
+            cat_query = idx_match.group(1)
+            target_idx = int(idx_match.group(2))
+            for w in windows:
+                # Match alias directly ("terminal 1")
+                if w.alias.lower() == f"{cat_query} {target_idx}":
+                    return w
+                # Match category and index
+                if (w.category == cat_query or w.process_name.lower().replace(".exe", "") == cat_query) and w.index == target_idx:
+                    return w
+
+        # 2. Exact alias match
+        for w in windows:
+            if w.alias.lower() == query_str:
+                return w
+
+        # 3. Exact title match (case-insensitive)
         for w in windows:
             if w.title.lower() == query_str:
                 return w
 
-        # 2. Process name match (e.g. "chrome", "code", "spotify", "notepad")
+        # 4. If query is a general category without index (e.g. "terminal", "explorer", "browser"),
+        # return the first instance (terminal 1, explorer 1)
+        for w in windows:
+            if w.category == query_str and w.index == 1:
+                return w
+
+        # 5. Process name match (e.g. "chrome", "code", "spotify", "notepad")
         for w in windows:
             p_base = w.process_name.lower().replace(".exe", "")
             if query_str == p_base or query_str in p_base:
                 return w
 
-        # 3. Substring in title
+        # 6. Substring in title
         for w in windows:
             if query_str in w.title.lower():
                 return w
 
         return None
+
+    def send_input_to_window(
+        self,
+        query: str | int,
+        text: str,
+        press_enter: bool = True,
+    ) -> dict[str, Any]:
+        """Focus a target window (e.g. 'terminal 1', 'terminal 2', HWND) and type text into it."""
+        target = self.find_window(query)
+        if not target:
+            return {"success": False, "error": f"Window '{query}' not found."}
+
+        brought = self.bring_to_front(target.hwnd)
+        if not brought:
+            return {"success": False, "error": f"Could not bring window '{target.title}' ({target.alias}) to foreground."}
+
+        time.sleep(0.15)
+        from app.tools.desktop.mouse_keyboard import mouse_keyboard
+        mouse_keyboard.type_text(text)
+        if press_enter:
+            time.sleep(0.05)
+            mouse_keyboard.press_hotkey(["enter"])
+
+        return {
+            "success": True,
+            "window": target.alias or target.title,
+            "hwnd": target.hwnd,
+            "typed": text,
+        }
 
     def bring_to_front(self, query: str | int) -> bool:
         """Forcefully bring the specified window to the foreground."""

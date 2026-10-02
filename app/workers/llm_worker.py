@@ -56,11 +56,11 @@ def focus_window(query: str) -> str:
 
 
 def list_open_windows() -> str:
-    """List all currently open, visible top-level application windows on the desktop."""
+    """List all currently open, visible top-level application windows on the desktop with numbered aliases."""
     windows = window_manager.list_windows()
     if not windows:
         return "No visible windows found."
-    lines = [f"- [{w.hwnd}] {w.process_name}: '{w.title}' (active={w.is_active})" for w in windows]
+    lines = [f"- [{w.alias}] {w.process_name} (HWND: {w.hwnd}, active={w.is_active}): '{w.title}'" for w in windows]
     return "Open Windows:\n" + "\n".join(lines)
 
 

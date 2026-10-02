@@ -184,6 +184,131 @@ class FileManager:
         except Exception as exc:
             return {"success": False, "error": str(exc)}
 
+    @staticmethod
+    def find_directory(
+        query: str,
+        search_roots: list[str] | None = None,
+        max_depth: int = 3,
+    ) -> dict[str, Any]:
+        """Search disk for a directory/folder matching a query string without asking the user.
+        
+        Evaluates common workspace roots (e.g. automations, Documents, Desktop, User profile)
+        and scores candidates based on token overlap, slug equality, and last modification recency.
+        """
+        import os
+        import re
+        import time
+
+        clean_query = query.strip().lower()
+        for noise in ("folder", "directory", "dir", "project", "repo", "in", "the", "my"):
+            clean_query = re.sub(rf"\b{noise}\b", "", clean_query).strip()
+
+        if not clean_query:
+            clean_query = query.strip().lower()
+
+        slug_query = re.sub(r"[\s_\-]+", "-", clean_query)
+        tokens = [t for t in re.split(r"[\s_\-]+", clean_query) if len(t) > 1]
+
+        if not search_roots:
+            home = str(Path.home())
+            search_roots = [
+                r"D:\OneDrive\Desktop\automations",
+                r"D:\OneDrive\Desktop",
+                str(Path(home) / "source" / "repos"),
+                str(Path(home) / "Documents" / "agentic_related_work"),
+                str(Path(home) / "Desktop"),
+                str(Path(home) / "Documents"),
+                str(Path.cwd()),
+            ]
+
+        candidates: list[dict[str, Any]] = []
+        seen_paths: set[str] = set()
+
+        for root_str in search_roots:
+            root_path = Path(root_str)
+            if not root_path.exists() or not root_path.is_dir():
+                continue
+
+            # First check if the root itself matches
+            r_name = root_path.name.lower()
+            if clean_query in r_name or slug_query in r_name:
+                candidates.append({"path": str(root_path), "score": 95, "name": root_path.name})
+                seen_paths.add(str(root_path).lower())
+
+            # Walk child directories up to max_depth
+            try:
+                for current_root, dirs, _ in os.walk(root_path):
+                    # Filter out hidden or vendor dirs
+                    dirs[:] = [
+                        d for d in dirs
+                        if not d.startswith(".") and d not in ("node_modules", "__pycache__", "venv", ".venv", "dist", "build")
+                    ]
+                    current_path = Path(current_root)
+                    depth = len(current_path.relative_to(root_path).parts)
+                    if depth > max_depth:
+                        dirs.clear()
+                        continue
+
+                    for d in dirs:
+                        full_dir = current_path / d
+                        full_dir_str = str(full_dir)
+                        if full_dir_str.lower() in seen_paths:
+                            continue
+                        seen_paths.add(full_dir_str.lower())
+
+                        d_lower = d.lower()
+                        d_slug = re.sub(r"[\s_\-]+", "-", d_lower)
+
+                        score = 0
+                        # Exact name match
+                        if d_lower == clean_query or d_slug == slug_query:
+                            score += 100
+                        elif slug_query in d_slug or clean_query in d_lower:
+                            score += 80
+                        elif tokens and all(t in d_lower or t in d_slug for t in tokens):
+                            score += 70
+                        elif tokens and any(t in d_lower for t in tokens):
+                            score += 40
+
+                        if score > 0:
+                            # Recency bonus
+                            try:
+                                mtime = full_dir.stat().st_mtime
+                                age_days = (time.time() - mtime) / 86400
+                                if age_days < 7:
+                                    score += 15
+                                elif age_days < 30:
+                                    score += 5
+                            except Exception:
+                                pass
+
+                            candidates.append({
+                                "path": full_dir_str,
+                                "name": d,
+                                "score": score,
+                            })
+            except Exception as exc:
+                logger.debug("Error walking search root %s: %s", root_str, exc)
+
+        if not candidates:
+            return {
+                "success": False,
+                "error": f"No directory found matching query '{query}'.",
+                "query": query,
+            }
+
+        candidates.sort(key=lambda c: c["score"], reverse=True)
+        best = candidates[0]
+
+        return {
+            "success": True,
+            "query": query,
+            "best_match": best["path"],
+            "best_match_name": best["name"],
+            "score": best["score"],
+            "all_matches": [c["path"] for c in candidates[:5]],
+        }
+
 
 # Global file manager singleton
 file_manager = FileManager()

@@ -33,6 +33,11 @@ class Settings:
     gemini_live_voice: str = os.getenv("GEMINI_LIVE_VOICE", "Kore")
     complex_llm_model: str = os.getenv("COMPLEX_LLM_MODEL", "gemini-3.6-flash")
 
+    # OpenRouter (CoT Reasoning Worker - Nemotron 3.5 Lightning)
+    openrouter_api_key: str = os.getenv("OPENROUTER_API_KEY", "")
+    openrouter_base_url: str = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+    cot_reasoning_model: str = os.getenv("COT_REASONING_MODEL", "nvidia/nemotron-3.5-lightning:free")
+
     # LiveKit
     livekit_url: str = os.getenv("LIVEKIT_URL", "")
     livekit_api_key: str = os.getenv("LIVEKIT_API_KEY", "")
@@ -49,6 +54,11 @@ class Settings:
             os.environ["GOOGLE_API_KEY"] = self.gemini_api_key
         if self.typesafe_api_key and not os.environ.get("TYPESAFE_API_KEY"):
             os.environ["TYPESAFE_API_KEY"] = self.typesafe_api_key
+        if self.openrouter_api_key and not os.environ.get("OPENROUTER_API_KEY"):
+            os.environ["OPENROUTER_API_KEY"] = self.openrouter_api_key
+
+    def is_openrouter_configured(self) -> bool:
+        return bool(self.openrouter_api_key and self.openrouter_api_key.startswith("sk-or-"))
 
     def is_jev_configured(self) -> bool:
         return bool(self.typesafe_api_key and self.typesafe_api_key.startswith("apikey_"))

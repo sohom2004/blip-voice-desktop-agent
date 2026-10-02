@@ -50,3 +50,6 @@ desktop.ini
 .idea/
 *.swp
 *.swo
+
+# Runtime Data
+data/

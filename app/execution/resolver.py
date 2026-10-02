@@ -238,23 +238,25 @@ class CapabilityResolver:
         if target.dom_selector or (target.element_id and target.element_id.startswith("dom_")):
             return True
 
+        if target.element_id and target.element_id.startswith("elem_"):
+            return False
+
         if target.process_name:
             p = target.process_name.lower()
             if not p.endswith(".exe"):
                 p += ".exe"
-            if p in BROWSER_PROCESSES:
-                return True
+            return p in BROWSER_PROCESSES
 
         if target.hwnd:
             active = window_manager.get_active_window()
             if active and active.hwnd == target.hwnd:
-                if active.process_name.lower() in BROWSER_PROCESSES:
-                    return True
+                return active.process_name.lower() in BROWSER_PROCESSES
 
-        # Check currently active window
-        active = window_manager.get_active_window()
-        if active and active.process_name.lower() in BROWSER_PROCESSES and not target.window_query:
-            return True
+        # Check currently active window only if no target window or element_id specified
+        if not target.window_query and not target.element_id and not target.element_name:
+            active = window_manager.get_active_window()
+            if active and active.process_name.lower() in BROWSER_PROCESSES:
+                return True
 
         return False
 
